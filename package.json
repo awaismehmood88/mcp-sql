@@ -1,0 +1,40 @@
+{
+  "name": "mcp-mssql",
+  "version": "0.1.0",
+  "description": "MCP server for Microsoft SQL Server with read-only mode and human-in-the-loop query gating.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-mssql": "dist/index.js",
+    "mcp-mssql-approve": "dist/cli/approve.js",
+    "mcp-mssql-check": "dist/cli/check.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "approve": "node dist/cli/approve.js",
+    "test:db": "tsx src/cli/check.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^16.4.5",
+    "mssql": "^11.0.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/mssql": "^9.1.5",
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

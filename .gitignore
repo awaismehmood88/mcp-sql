@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+.env.local
+.mcp-pending/
+*.log
+.DS_Store
