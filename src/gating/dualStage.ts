@@ -87,6 +87,31 @@ export const decideRequest = async (
   return req;
 };
 
+export interface AwaitOptions {
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+}
+
+export const awaitDecision = async (
+  dir: string,
+  id: string,
+  opts: AwaitOptions = {},
+): Promise<PendingRequest> => {
+  const pollMs = opts.pollIntervalMs ?? 500;
+  const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const req = await readRequest(dir, id);
+    if (!req) throw new Error(`Request ${id} disappeared from disk.`);
+    if (req.status === "approved" || req.status === "rejected") return req;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  throw new Error(
+    `Approval timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${id}. ` +
+      `The pending file is still on disk — approve it and call the tool again, or raise MCP_APPROVAL_TIMEOUT_MS.`,
+  );
+};
+
 export const pruneOldRequests = async (dir: string): Promise<void> => {
   try {
     const files = await fs.readdir(dir);

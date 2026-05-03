@@ -3,5 +3,6 @@ dist/
 .env
 .env.local
 .mcp-pending/
+logs/
 *.log
 .DS_Store

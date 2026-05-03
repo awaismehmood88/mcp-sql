@@ -7,7 +7,8 @@
   "bin": {
     "mcp-mssql": "dist/index.js",
     "mcp-mssql-approve": "dist/cli/approve.js",
-    "mcp-mssql-check": "dist/cli/check.js"
+    "mcp-mssql-check": "dist/cli/check.js",
+    "mcp-mssql-watch": "dist/cli/watch.js"
   },
   "files": [
     "dist",
@@ -19,6 +20,7 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "approve": "node dist/cli/approve.js",
+    "approve:watch": "node dist/cli/watch.js",
     "test:db": "tsx src/cli/check.ts",
     "typecheck": "tsc --noEmit"
   },

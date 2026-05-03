@@ -28,6 +28,7 @@ export interface Config {
   hitlMode: HitlMode;
   pendingDir: string;
   queryTimeoutMs: number;
+  approvalTimeoutMs: number;
   maxRows: number;
 }
 
@@ -74,5 +75,6 @@ export const loadConfig = (): Config => ({
   hitlMode: hitlModeEnv("interactive"),
   pendingDir: process.env.MCP_PENDING_DIR?.trim() || ".mcp-pending",
   queryTimeoutMs: intEnv("MCP_QUERY_TIMEOUT_MS", 30000),
+  approvalTimeoutMs: intEnv("MCP_APPROVAL_TIMEOUT_MS", 5 * 60 * 1000),
   maxRows: intEnv("MCP_MAX_ROWS", 1000),
 });
