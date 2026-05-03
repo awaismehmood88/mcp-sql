@@ -13,9 +13,12 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
       description:
         "ONLY USE to fetch the result of a request_query call you previously made " +
         "in this same conversation. Do NOT call with arbitrary or guessed request_ids.\n\n" +
-        "Returns one of: status='pending' (still awaiting human approval), " +
+        `Returns one of: status='pending' (still awaiting human approval), ` +
         "status='rejected' (operator rejected), status='completed' (rows attached). " +
-        "On the first call after approval, the SQL is executed and the rows are cached.",
+        "On the first call after approval, the SQL is executed against MSSQL database " +
+        `"${cfg.sourceLabel}" and the rows are cached.\n\n` +
+        `When relaying completed results to the user, ALWAYS state the source as ` +
+        `"mssql:${cfg.sourceLabel}".`,
       inputSchema: {
         request_id: z.string().describe("The REQ-... id returned by request_query."),
       },
@@ -64,11 +67,14 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
           content: [
             {
               type: "text",
-              text: `${req.rowCount ?? 0} row(s)${req.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(req.columns ?? [])}`,
+              text:
+                `Source: mssql:${cfg.sourceLabel}\n` +
+                `${req.rowCount ?? 0} row(s)${req.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(req.columns ?? [])}`,
             },
           ],
           structuredContent: {
             status: "completed",
+            source: `mssql:${cfg.sourceLabel}`,
             request_id: req.id,
             rows: req.rows ?? [],
             columns: req.columns ?? [],
@@ -97,11 +103,14 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
           content: [
             {
               type: "text",
-              text: `${result.rowCount} row(s)${result.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(result.columns)}`,
+              text:
+                `Source: mssql:${cfg.sourceLabel}\n` +
+                `${result.rowCount} row(s)${result.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(result.columns)}`,
             },
           ],
           structuredContent: {
             status: "completed",
+            source: `mssql:${cfg.sourceLabel}`,
             request_id: req.id,
             rows: result.rows,
             columns: result.columns,

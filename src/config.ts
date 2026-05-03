@@ -30,6 +30,7 @@ export interface Config {
   queryTimeoutMs: number;
   approvalTimeoutMs: number;
   maxRows: number;
+  sourceLabel: string;
 }
 
 const required = (name: string): string => {
@@ -61,20 +62,24 @@ const hitlModeEnv = (fallback: HitlMode): HitlMode => {
   throw new Error(`MCP_HITL_MODE must be one of interactive|dual_stage|off, got: ${v}`);
 };
 
-export const loadConfig = (): Config => ({
-  mssql: {
-    server: required("MSSQL_SERVER"),
-    port: intEnv("MSSQL_PORT", 1433),
-    database: required("MSSQL_DATABASE"),
-    user: required("MSSQL_USER"),
-    password: required("MSSQL_PASSWORD"),
-    encrypt: boolEnv("MSSQL_ENCRYPT", true),
-    trustServerCertificate: boolEnv("MSSQL_TRUST_SERVER_CERT", false),
-  },
-  readOnly: boolEnv("MCP_READ_ONLY", true),
-  hitlMode: hitlModeEnv("interactive"),
-  pendingDir: process.env.MCP_PENDING_DIR?.trim() || ".mcp-pending",
-  queryTimeoutMs: intEnv("MCP_QUERY_TIMEOUT_MS", 30000),
-  approvalTimeoutMs: intEnv("MCP_APPROVAL_TIMEOUT_MS", 5 * 60 * 1000),
-  maxRows: intEnv("MCP_MAX_ROWS", 1000),
-});
+export const loadConfig = (): Config => {
+  const database = required("MSSQL_DATABASE");
+  return {
+    mssql: {
+      server: required("MSSQL_SERVER"),
+      port: intEnv("MSSQL_PORT", 1433),
+      database,
+      user: required("MSSQL_USER"),
+      password: required("MSSQL_PASSWORD"),
+      encrypt: boolEnv("MSSQL_ENCRYPT", true),
+      trustServerCertificate: boolEnv("MSSQL_TRUST_SERVER_CERT", false),
+    },
+    readOnly: boolEnv("MCP_READ_ONLY", true),
+    hitlMode: hitlModeEnv("interactive"),
+    pendingDir: process.env.MCP_PENDING_DIR?.trim() || ".mcp-pending",
+    queryTimeoutMs: intEnv("MCP_QUERY_TIMEOUT_MS", 30000),
+    approvalTimeoutMs: intEnv("MCP_APPROVAL_TIMEOUT_MS", 5 * 60 * 1000),
+    maxRows: intEnv("MCP_MAX_ROWS", 1000),
+    sourceLabel: process.env.MCP_SOURCE_LABEL?.trim() || database,
+  };
+};

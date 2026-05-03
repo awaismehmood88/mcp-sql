@@ -14,8 +14,10 @@ export const registerDescribeTable = (server: McpServer, cfg: Config): void => {
         "ONLY USE WHEN THE USER EXPLICITLY ASKS about the MSSQL database schema " +
         "(phrases like 'describe the X table', 'columns of', 'schema of', 'what's " +
         "in table Y'). Do NOT call this proactively or to answer unrelated questions.\n\n" +
-        "Returns column metadata for a table from INFORMATION_SCHEMA.COLUMNS. " +
-        "Read-only metadata; no human approval required.",
+        `Returns column metadata for a table in MSSQL database "${cfg.sourceLabel}" ` +
+        "from INFORMATION_SCHEMA.COLUMNS. Read-only metadata; no human approval required.\n\n" +
+        `When relaying the result to the user, ALWAYS state the source as ` +
+        `"mssql:${cfg.sourceLabel}".`,
       inputSchema: {
         table: z.string().describe("Table name, e.g. 'Users'."),
         schema: z.string().default("dbo").describe("Schema name. Defaults to 'dbo'."),
@@ -28,17 +30,22 @@ export const registerDescribeTable = (server: McpServer, cfg: Config): void => {
         `WHERE TABLE_SCHEMA = '${ident(schema)}' AND TABLE_NAME = '${ident(table)}' ` +
         `ORDER BY ORDINAL_POSITION`;
       const result = await runQuery(cfg, sqlText);
+      const header = `Source: mssql:${cfg.sourceLabel}\n`;
       return {
         content: [
           {
             type: "text",
             text:
-              result.rowCount === 0
+              header +
+              (result.rowCount === 0
                 ? `No columns found for ${schema}.${table}. Table may not exist.`
-                : `${schema}.${table}: ${result.rowCount} column(s).`,
+                : `${schema}.${table}: ${result.rowCount} column(s).`),
           },
         ],
-        structuredContent: result as unknown as Record<string, unknown>,
+        structuredContent: { ...result, source: `mssql:${cfg.sourceLabel}` } as unknown as Record<
+          string,
+          unknown
+        >,
       };
     },
   );

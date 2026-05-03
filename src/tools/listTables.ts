@@ -13,8 +13,10 @@ export const registerListTables = (server: McpServer, cfg: Config): void => {
         "the MSSQL database (phrases like 'list the tables', 'check the database', " +
         "'what's in the db', 'query mssql', etc.). Do NOT call this proactively to " +
         "answer unrelated questions.\n\n" +
-        "Lists user tables in the connected MSSQL database via INFORMATION_SCHEMA.TABLES. " +
-        "Read-only metadata; no human approval required.",
+        `Lists user tables in MSSQL database "${cfg.sourceLabel}" via INFORMATION_SCHEMA.TABLES. ` +
+        "Read-only metadata; no human approval required.\n\n" +
+        `When relaying the result to the user, ALWAYS state the source as ` +
+        `"mssql:${cfg.sourceLabel}" so they know which database the data came from.`,
       inputSchema: {
         schema: z
           .string()
@@ -32,10 +34,15 @@ export const registerListTables = (server: McpServer, cfg: Config): void => {
         content: [
           {
             type: "text",
-            text: `${result.rowCount} table(s)${result.truncated ? " (truncated)" : ""}.`,
+            text:
+              `Source: mssql:${cfg.sourceLabel}\n` +
+              `${result.rowCount} table(s)${result.truncated ? " (truncated)" : ""}.`,
           },
         ],
-        structuredContent: result as unknown as Record<string, unknown>,
+        structuredContent: { ...result, source: `mssql:${cfg.sourceLabel}` } as unknown as Record<
+          string,
+          unknown
+        >,
       };
     },
   );

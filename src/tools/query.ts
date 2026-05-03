@@ -30,9 +30,11 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
         "rows from', 'select from', 'show me records'). Do NOT call this " +
         "proactively. Every call requires explicit human approval — do not invoke " +
         "speculatively.\n\n" +
-        `Executes a SQL query against the connected MSSQL database and returns the rows.` +
+        `Executes a SQL query against MSSQL database "${cfg.sourceLabel}" and returns the rows.` +
         (cfg.readOnly ? " Read-only mode: only SELECT/WITH/EXPLAIN statements are allowed." : "") +
-        gatedNote,
+        gatedNote +
+        `\n\nWhen relaying the result to the user, ALWAYS state the source as ` +
+        `"mssql:${cfg.sourceLabel}" so they know which database the rows came from.`,
       inputSchema: {
         sql: z.string().min(1).describe("The SQL statement to execute."),
       },
@@ -104,10 +106,15 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
             content: [
               {
                 type: "text",
-                text: `${result.rowCount} row(s)${result.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(result.columns)}`,
+                text:
+                  `Source: mssql:${cfg.sourceLabel}\n` +
+                  `${result.rowCount} row(s)${result.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(result.columns)}`,
               },
             ],
-            structuredContent: result as unknown as Record<string, unknown>,
+            structuredContent: { ...result, source: `mssql:${cfg.sourceLabel}` } as unknown as Record<
+              string,
+              unknown
+            >,
           };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);

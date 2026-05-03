@@ -28,7 +28,7 @@ const main = async () => {
   }
 
   const server = new McpServer({
-    name: "mcp-mssql",
+    name: `mcp-mssql:${cfg.sourceLabel}`,
     version: "0.1.0",
   });
 
