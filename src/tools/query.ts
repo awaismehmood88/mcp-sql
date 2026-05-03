@@ -25,7 +25,12 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
     {
       title: "Run a SQL query",
       description:
-        `Execute a SQL query against the connected MSSQL database and return the rows.` +
+        "ONLY USE WHEN THE USER EXPLICITLY ASKS to run a SQL query, fetch records, " +
+        "or read data from the MSSQL database (phrases like 'query the db', 'fetch " +
+        "rows from', 'select from', 'show me records'). Do NOT call this " +
+        "proactively. Every call requires explicit human approval — do not invoke " +
+        "speculatively.\n\n" +
+        `Executes a SQL query against the connected MSSQL database and returns the rows.` +
         (cfg.readOnly ? " Read-only mode: only SELECT/WITH/EXPLAIN statements are allowed." : "") +
         gatedNote,
       inputSchema: {

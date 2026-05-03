@@ -9,7 +9,11 @@ export const registerListTables = (server: McpServer, cfg: Config): void => {
     {
       title: "List tables",
       description:
-        "List user tables in the connected MSSQL database via INFORMATION_SCHEMA.TABLES. " +
+        "ONLY USE WHEN THE USER EXPLICITLY ASKS to inspect, query, or work with " +
+        "the MSSQL database (phrases like 'list the tables', 'check the database', " +
+        "'what's in the db', 'query mssql', etc.). Do NOT call this proactively to " +
+        "answer unrelated questions.\n\n" +
+        "Lists user tables in the connected MSSQL database via INFORMATION_SCHEMA.TABLES. " +
         "Read-only metadata; no human approval required.",
       inputSchema: {
         schema: z

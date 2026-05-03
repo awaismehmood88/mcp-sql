@@ -11,10 +11,12 @@ export const registerRequestQuery = (server: McpServer, cfg: Config): void => {
     {
       title: "Request a SQL query (dual-stage)",
       description:
-        "Submit a SQL query for human approval and receive a request_id immediately. " +
-        "The query does NOT run until the operator runs `mcp-mssql-approve <request_id>` " +
-        "in a separate terminal. Poll get_query_result with the returned request_id to fetch " +
-        "the rows once approved." +
+        "ONLY USE WHEN THE USER EXPLICITLY ASKS to run a SQL query against the " +
+        "MSSQL database. Do NOT call this proactively or speculatively.\n\n" +
+        "Submits a SQL query for human approval and returns a request_id immediately. " +
+        "The query does NOT run until the operator approves it in a separate terminal " +
+        "(`npm run approve:watch` or `mcp-mssql-approve <id>`). Poll get_query_result " +
+        "with the returned request_id to fetch the rows once approved." +
         (cfg.readOnly ? " Read-only mode: only SELECT/WITH/EXPLAIN statements are allowed." : ""),
       inputSchema: {
         sql: z.string().min(1).describe("The SQL statement to request execution of."),

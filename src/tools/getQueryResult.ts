@@ -11,10 +11,11 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
     {
       title: "Get query result (dual-stage)",
       description:
-        "Fetch the status/result of a previously submitted request_query call. Returns one of: " +
-        "status='pending' (still awaiting human approval), status='rejected' (operator rejected), " +
-        "status='completed' (rows attached). On the first call after approval, the SQL is executed " +
-        "and the rows are cached on the request file.",
+        "ONLY USE to fetch the result of a request_query call you previously made " +
+        "in this same conversation. Do NOT call with arbitrary or guessed request_ids.\n\n" +
+        "Returns one of: status='pending' (still awaiting human approval), " +
+        "status='rejected' (operator rejected), status='completed' (rows attached). " +
+        "On the first call after approval, the SQL is executed and the rows are cached.",
       inputSchema: {
         request_id: z.string().describe("The REQ-... id returned by request_query."),
       },

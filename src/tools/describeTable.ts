@@ -11,7 +11,10 @@ export const registerDescribeTable = (server: McpServer, cfg: Config): void => {
     {
       title: "Describe table",
       description:
-        "Return column metadata for a table from INFORMATION_SCHEMA.COLUMNS. " +
+        "ONLY USE WHEN THE USER EXPLICITLY ASKS about the MSSQL database schema " +
+        "(phrases like 'describe the X table', 'columns of', 'schema of', 'what's " +
+        "in table Y'). Do NOT call this proactively or to answer unrelated questions.\n\n" +
+        "Returns column metadata for a table from INFORMATION_SCHEMA.COLUMNS. " +
         "Read-only metadata; no human approval required.",
       inputSchema: {
         table: z.string().describe("Table name, e.g. 'Users'."),
