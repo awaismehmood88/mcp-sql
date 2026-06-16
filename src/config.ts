@@ -1,6 +1,7 @@
 import { config as loadDotenv } from "dotenv";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { resolvePendingDir } from "./paths.js";
 
 // Load .env from a fixed location next to the installed server, so creds work
 // regardless of the cwd Claude Code (or anything else) spawns us from.
@@ -76,7 +77,7 @@ export const loadConfig = (): Config => {
     },
     readOnly: boolEnv("MCP_READ_ONLY", true),
     hitlMode: hitlModeEnv("interactive"),
-    pendingDir: process.env.MCP_PENDING_DIR?.trim() || ".mcp-pending",
+    pendingDir: resolvePendingDir(import.meta.url, 1),
     queryTimeoutMs: intEnv("MCP_QUERY_TIMEOUT_MS", 30000),
     approvalTimeoutMs: intEnv("MCP_APPROVAL_TIMEOUT_MS", 5 * 60 * 1000),
     maxRows: intEnv("MCP_MAX_ROWS", 1000),

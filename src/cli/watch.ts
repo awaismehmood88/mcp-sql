@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Interactive approval terminal.
-//   list mode  :  ↑/↓ navigate pending requests · Enter to open · q to quit
-//   decide mode:  ←/→ or ↑/↓ to pick Approve/Reject · Enter confirm · Esc back
+//   list mode  :  ↑/↓ navigate · Enter decide · a auto-approve · c cancel auto · r refresh · q quit
+//   decide mode:  ←/→ or ↑/↓ pick Approve/Reject · Enter confirm · Esc back
+//   auto mode  :  ←/→ or ↑/↓ pick 5/10/15/30 min · Enter arm · Esc back
 
 import { config as loadDotenv } from "dotenv";
 import { fileURLToPath } from "node:url";
@@ -9,12 +10,14 @@ import path from "node:path";
 import fs from "node:fs";
 import readline from "node:readline";
 import { decideRequest, readRequest } from "../gating/dualStage.js";
+import { resolvePendingDir } from "../paths.js";
+import { auditPath, readDecisions, recordDecision, type AuditEntry } from "../audit.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 loadDotenv({ path: path.resolve(here, "..", "..", ".env") });
 loadDotenv();
 
-const dir = path.resolve(process.env.MCP_PENDING_DIR?.trim() || ".mcp-pending");
+const dir = resolvePendingDir(import.meta.url, 2);
 
 const ANSI = {
   clear: "\x1b[2J\x1b[H",
@@ -36,13 +39,23 @@ interface PendingItem {
   createdAt: string;
 }
 
-type Mode = "list" | "decide" | "done";
+type Mode = "list" | "decide" | "auto" | "history" | "done";
+
+const AUTO_DURATIONS = [5, 10, 15, 30] as const;
+type AutoCursor = 0 | 1 | 2 | 3;
 
 let pending: PendingItem[] = [];
 let listCursor = 0;
 let mode: Mode = "list";
-let decideCursor: 0 | 1 = 0; // 0 = Approve, 1 = Reject
+let decideCursor: 0 | 1 = 0;
+let autoCursor: AutoCursor = 0;
+let autoApprove: { until: number; durationMinutes: number } | null = null;
+let autoTickTimer: NodeJS.Timeout | null = null;
 let lastMessage: { text: string; color: string } | null = null;
+let history: AuditEntry[] = [];
+let historyCursor = 0;
+const HISTORY_PAGE_SIZE = 20;
+let historyOffset = 0;
 
 const idFromFile = (file: string): string | null => {
   const m = file.match(/^(REQ-[\w-]+)\.json$/);
@@ -72,18 +85,36 @@ const loadPending = async (): Promise<void> => {
 const truncate = (s: string, n: number): string =>
   s.length > n ? s.slice(0, n - 1) + "…" : s;
 
+const formatRemaining = (ms: number): string => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+};
+
+const autoStatusLine = (): string => {
+  if (!autoApprove) return "";
+  const remainingMs = autoApprove.until - Date.now();
+  return (
+    `${ANSI.invert}${ANSI.green}${ANSI.bold} 🟢 AUTO-APPROVE ` +
+    `${formatRemaining(remainingMs)} remaining (${autoApprove.durationMinutes} min window) · c to cancel ${ANSI.reset}\n\n`
+  );
+};
+
 const render = (): void => {
   if (mode === "done") return;
   let out = ANSI.clear;
   out += `${ANSI.bold}${ANSI.cyan}mcp-mssql approval watcher${ANSI.reset}\n`;
   out += `${ANSI.dim}${dir}${ANSI.reset}\n\n`;
 
+  out += autoStatusLine();
+
   if (lastMessage) {
     out += `${lastMessage.color}${lastMessage.text}${ANSI.reset}\n\n`;
   }
 
   if (mode === "list") {
-    out += `${ANSI.dim}↑/↓ navigate · Enter: decide · r: refresh · q: quit${ANSI.reset}\n\n`;
+    out += `${ANSI.dim}↑/↓ navigate · Enter: decide · a: auto-approve · ${autoApprove ? "c: cancel auto · " : ""}h: history · r: refresh · q: quit${ANSI.reset}\n\n`;
     if (pending.length === 0) {
       out += `${ANSI.dim}(no pending requests — waiting for new ones…)${ANSI.reset}\n`;
     } else {
@@ -98,7 +129,7 @@ const render = (): void => {
         }
       });
     }
-  } else {
+  } else if (mode === "decide") {
     const sel = pending[listCursor];
     if (!sel) {
       mode = "list";
@@ -124,6 +155,58 @@ const render = (): void => {
       }
     });
     out += `\n`;
+  } else if (mode === "history") {
+    const stats = {
+      autoApproved: history.filter((h) => h.mode === "auto" && h.decision === "approved").length,
+      manualApproved: history.filter((h) => h.mode === "manual" && h.decision === "approved").length,
+      rejected: history.filter((h) => h.decision === "rejected").length,
+    };
+    out += `${ANSI.dim}↑/↓ scroll · PgUp/PgDn page · Esc: back · q: quit${ANSI.reset}\n\n`;
+    out += `${ANSI.bold}Approval history${ANSI.reset}  `;
+    out += `${ANSI.dim}(showing last ${history.length}, newest first)${ANSI.reset}\n`;
+    out += `${ANSI.green}${stats.autoApproved} auto-approved${ANSI.reset}  ·  `;
+    out += `${ANSI.cyan}${stats.manualApproved} manual approved${ANSI.reset}  ·  `;
+    out += `${ANSI.red}${stats.rejected} rejected${ANSI.reset}\n`;
+    out += `${ANSI.dim}log: ${auditPath()}${ANSI.reset}\n\n`;
+
+    if (history.length === 0) {
+      out += `${ANSI.dim}(no decisions logged yet)${ANSI.reset}\n`;
+    } else {
+      const end = Math.min(historyOffset + HISTORY_PAGE_SIZE, history.length);
+      for (let i = historyOffset; i < end; i++) {
+        const h = history[i]!;
+        const when = h.decidedAt.replace("T", " ").slice(0, 19);
+        const badge =
+          h.mode === "auto"
+            ? `${ANSI.invert}${ANSI.green} AUTO ${ANSI.reset}`
+            : `${ANSI.dim}MANUAL${ANSI.reset}`;
+        const mark =
+          h.decision === "approved" ? `${ANSI.green}✓${ANSI.reset}` : `${ANSI.red}✗${ANSI.reset}`;
+        const sql = truncate(h.sql.replace(/\s+/g, " ").trim(), 70);
+        const selected = i === historyCursor;
+        const prefix = selected ? `${ANSI.invert} ▶ ` : "   ";
+        const idCell = h.id.padEnd(28, " ");
+        out += `${prefix}${ANSI.dim}${when}${ANSI.reset}  ${badge} ${mark}  ${idCell}${ANSI.reset}  ${ANSI.dim}${sql}${ANSI.reset}\n`;
+      }
+      if (history.length > HISTORY_PAGE_SIZE) {
+        out += `\n${ANSI.dim}showing ${historyOffset + 1}–${end} of ${history.length}${ANSI.reset}\n`;
+      }
+    }
+  } else {
+    // mode === "auto"
+    out += `${ANSI.dim}←/→ or ↑/↓ choose duration · Enter: arm · Esc: back · q: quit${ANSI.reset}\n\n`;
+    out += `${ANSI.bold}Auto-approve every new request for…${ANSI.reset}\n\n`;
+    AUTO_DURATIONS.forEach((mins, i) => {
+      const label = ` ${String(mins).padStart(2, " ")} min `;
+      if (i === autoCursor) {
+        out += `  ${ANSI.invert}${ANSI.green}${ANSI.bold}${label}${ANSI.reset}  `;
+      } else {
+        out += `  ${ANSI.dim}${label}${ANSI.reset}  `;
+      }
+    });
+    out += `\n\n`;
+    out += `${ANSI.yellow}⚠  All pending and incoming queries will run without further prompts.${ANSI.reset}\n`;
+    out += `${ANSI.yellow}    You can cancel early by pressing c in the list view.${ANSI.reset}\n`;
   }
   process.stdout.write(out);
 };
@@ -136,12 +219,96 @@ const flash = (text: string, color: string): void => {
   }, 2500);
 };
 
+const autoApproveNewPendings = async (): Promise<number> => {
+  if (!autoApprove || Date.now() >= autoApprove.until) return 0;
+  let count = 0;
+  let files: string[] = [];
+  try {
+    files = await fs.promises.readdir(dir);
+  } catch {
+    return 0;
+  }
+  for (const f of files) {
+    const id = idFromFile(f);
+    if (!id) continue;
+    const r = await readRequest(dir, id).catch(() => null);
+    if (r?.status === "pending") {
+      try {
+        await decideRequest(dir, id, "approved");
+        recordDecision({
+          decidedAt: new Date().toISOString(),
+          id: r.id,
+          sql: r.sql,
+          decision: "approved",
+          mode: "auto",
+        });
+        count++;
+      } catch {
+        // already decided by something else — skip
+      }
+    }
+  }
+  return count;
+};
+
+const startAutoApprove = async (minutes: number): Promise<void> => {
+  autoApprove = { until: Date.now() + minutes * 60 * 1000, durationMinutes: minutes };
+  if (autoTickTimer) clearInterval(autoTickTimer);
+  autoTickTimer = setInterval(() => {
+    if (!autoApprove) {
+      if (autoTickTimer) {
+        clearInterval(autoTickTimer);
+        autoTickTimer = null;
+      }
+      return;
+    }
+    if (Date.now() >= autoApprove.until) {
+      const elapsed = autoApprove.durationMinutes;
+      autoApprove = null;
+      if (autoTickTimer) {
+        clearInterval(autoTickTimer);
+        autoTickTimer = null;
+      }
+      flash(`⏱  Auto-approve window expired (${elapsed} min). Manual approval required again.`, ANSI.yellow);
+      void loadPending().then(render);
+      return;
+    }
+    if (mode === "list") render();
+  }, 1000);
+
+  const cleared = await autoApproveNewPendings();
+  await loadPending();
+  flash(
+    `🟢 Auto-approve armed for ${minutes} min` + (cleared > 0 ? ` (cleared ${cleared} existing)` : ""),
+    ANSI.green,
+  );
+  render();
+};
+
+const cancelAutoApprove = (): void => {
+  if (!autoApprove) return;
+  autoApprove = null;
+  if (autoTickTimer) {
+    clearInterval(autoTickTimer);
+    autoTickTimer = null;
+  }
+  flash("Auto-approve cancelled.", ANSI.yellow);
+  render();
+};
+
 const commitDecision = async (): Promise<void> => {
   const sel = pending[listCursor];
   if (!sel) return;
   const approve = decideCursor === 0;
   try {
     const updated = await decideRequest(dir, sel.id, approve ? "approved" : "rejected");
+    recordDecision({
+      decidedAt: new Date().toISOString(),
+      id: updated.id,
+      sql: sel.sql,
+      decision: approve ? "approved" : "rejected",
+      mode: "manual",
+    });
     flash(
       `${approve ? "✓ approved" : "✗ rejected"} ${updated.id}`,
       approve ? ANSI.green : ANSI.red,
@@ -159,7 +326,7 @@ const onKey = async (
   key: { name?: string; ctrl?: boolean; sequence?: string },
 ): Promise<void> => {
   if (key.ctrl && key.name === "c") return cleanup(0);
-  if (key.name === "q" && mode !== "decide") return cleanup(0);
+  if (key.name === "q" && mode === "list") return cleanup(0);
 
   if (mode === "list") {
     if (key.name === "up" && listCursor > 0) {
@@ -175,19 +342,82 @@ const onKey = async (
     } else if (key.name === "r") {
       await loadPending();
       render();
+    } else if (key.name === "a") {
+      mode = "auto";
+      autoCursor = 0;
+      render();
+    } else if (key.name === "c" && autoApprove) {
+      cancelAutoApprove();
+    } else if (key.name === "h") {
+      history = await readDecisions(200);
+      historyCursor = 0;
+      historyOffset = 0;
+      mode = "history";
+      render();
     }
     return;
   }
 
-  // mode === "decide"
+  if (mode === "history") {
+    if (key.name === "escape" || key.name === "h") {
+      mode = "list";
+      render();
+    } else if (key.name === "up" && historyCursor > 0) {
+      historyCursor--;
+      if (historyCursor < historyOffset) historyOffset = historyCursor;
+      render();
+    } else if (key.name === "down" && historyCursor < history.length - 1) {
+      historyCursor++;
+      if (historyCursor >= historyOffset + HISTORY_PAGE_SIZE) {
+        historyOffset = historyCursor - HISTORY_PAGE_SIZE + 1;
+      }
+      render();
+    } else if (key.name === "pageup") {
+      historyOffset = Math.max(0, historyOffset - HISTORY_PAGE_SIZE);
+      historyCursor = historyOffset;
+      render();
+    } else if (key.name === "pagedown") {
+      historyOffset = Math.min(
+        Math.max(0, history.length - HISTORY_PAGE_SIZE),
+        historyOffset + HISTORY_PAGE_SIZE,
+      );
+      historyCursor = historyOffset;
+      render();
+    } else if (key.name === "q") {
+      return cleanup(0);
+    }
+    return;
+  }
+
+  if (mode === "decide") {
+    if (key.name === "left" || key.name === "up") {
+      decideCursor = 0;
+      render();
+    } else if (key.name === "right" || key.name === "down") {
+      decideCursor = 1;
+      render();
+    } else if (key.name === "return") {
+      await commitDecision();
+    } else if (key.name === "escape") {
+      mode = "list";
+      render();
+    } else if (key.name === "q") {
+      return cleanup(0);
+    }
+    return;
+  }
+
+  // mode === "auto"
   if (key.name === "left" || key.name === "up") {
-    decideCursor = 0;
+    autoCursor = (autoCursor > 0 ? autoCursor - 1 : 0) as AutoCursor;
     render();
   } else if (key.name === "right" || key.name === "down") {
-    decideCursor = 1;
+    autoCursor = (autoCursor < AUTO_DURATIONS.length - 1 ? autoCursor + 1 : autoCursor) as AutoCursor;
     render();
   } else if (key.name === "return") {
-    await commitDecision();
+    const mins = AUTO_DURATIONS[autoCursor]!;
+    mode = "list";
+    await startAutoApprove(mins);
   } else if (key.name === "escape") {
     mode = "list";
     render();
@@ -198,6 +428,10 @@ const onKey = async (
 
 const cleanup = (code: number): void => {
   mode = "done";
+  if (autoTickTimer) {
+    clearInterval(autoTickTimer);
+    autoTickTimer = null;
+  }
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
   process.stdout.write(ANSI.showCursor);
   process.stdout.write("\n");
@@ -228,18 +462,20 @@ const main = async (): Promise<void> => {
     process.stdout.write(ANSI.showCursor);
   });
 
-  // Debounced filesystem watcher — refreshes the list when files appear/change.
+  // Debounced filesystem watcher.
   let pendingRefresh: NodeJS.Timeout | null = null;
   const scheduleRefresh = (): void => {
     if (pendingRefresh) return;
     pendingRefresh = setTimeout(async () => {
       pendingRefresh = null;
+      // If auto-approve is armed, clear any new pendings immediately.
+      if (autoApprove && Date.now() < autoApprove.until) {
+        await autoApproveNewPendings();
+      }
       if (mode === "list") {
         await loadPending();
         render();
       } else {
-        // In decide mode, just refresh the underlying list silently —
-        // re-render on return to list mode.
         await loadPending();
       }
     }, 150);
