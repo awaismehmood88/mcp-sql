@@ -57,6 +57,18 @@ let historyCursor = 0;
 const HISTORY_PAGE_SIZE = 20;
 let historyOffset = 0;
 
+// Live feed of queries auto-approved during the current auto-approve session.
+// Reset when a new session starts; preserved across cancel/expire so the user
+// can still scroll the list view after the window ends.
+interface AutoSessionEntry {
+  time: number;
+  id: string;
+  sql: string;
+}
+const AUTO_FEED_LIMIT = 20;
+let autoSessionLog: AutoSessionEntry[] = [];
+let autoSessionApprovedCount = 0;
+
 const idFromFile = (file: string): string | null => {
   const m = file.match(/^(REQ-[\w-]+)\.json$/);
   return m ? m[1]! : null;
@@ -115,6 +127,30 @@ const render = (): void => {
 
   if (mode === "list") {
     out += `${ANSI.dim}↑/↓ navigate · Enter: decide · a: auto-approve · ${autoApprove ? "c: cancel auto · " : ""}h: history · r: refresh · q: quit${ANSI.reset}\n\n`;
+
+    // Live feed of auto-approved queries during this session.
+    if (autoApprove || autoSessionLog.length > 0) {
+      const label = autoApprove
+        ? `${ANSI.green}Auto-approved this session${ANSI.reset}`
+        : `${ANSI.dim}Auto-approved (last session)${ANSI.reset}`;
+      out += `${label}  `;
+      out += `${ANSI.bold}${autoSessionApprovedCount} total${ANSI.reset}`;
+      if (autoSessionLog.length < autoSessionApprovedCount) {
+        out += `  ${ANSI.dim}(showing newest ${autoSessionLog.length})${ANSI.reset}`;
+      }
+      out += `\n`;
+      if (autoSessionLog.length === 0) {
+        out += `  ${ANSI.dim}(none yet — waiting for incoming queries…)${ANSI.reset}\n`;
+      } else {
+        for (const entry of autoSessionLog) {
+          const when = new Date(entry.time).toLocaleTimeString();
+          const sqlOneLine = truncate(entry.sql.replace(/\s+/g, " ").trim(), 70);
+          out += `  ${ANSI.dim}${when}${ANSI.reset}  ${ANSI.green}✓${ANSI.reset} ${entry.id.padEnd(28, " ")}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
+        }
+      }
+      out += `\n`;
+    }
+
     if (pending.length === 0) {
       out += `${ANSI.dim}(no pending requests — waiting for new ones…)${ANSI.reset}\n`;
     } else {
@@ -242,6 +278,11 @@ const autoApproveNewPendings = async (): Promise<number> => {
           decision: "approved",
           mode: "auto",
         });
+        autoSessionLog.unshift({ time: Date.now(), id: r.id, sql: r.sql });
+        if (autoSessionLog.length > AUTO_FEED_LIMIT) {
+          autoSessionLog = autoSessionLog.slice(0, AUTO_FEED_LIMIT);
+        }
+        autoSessionApprovedCount++;
         count++;
       } catch {
         // already decided by something else — skip
@@ -253,6 +294,8 @@ const autoApproveNewPendings = async (): Promise<number> => {
 
 const startAutoApprove = async (minutes: number): Promise<void> => {
   autoApprove = { until: Date.now() + minutes * 60 * 1000, durationMinutes: minutes };
+  autoSessionLog = [];
+  autoSessionApprovedCount = 0;
   if (autoTickTimer) clearInterval(autoTickTimer);
   autoTickTimer = setInterval(() => {
     if (!autoApprove) {
