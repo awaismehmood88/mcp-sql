@@ -39,13 +39,24 @@ interface PendingItem {
   createdAt: string;
 }
 
-type Mode = "list" | "decide" | "auto" | "history" | "done";
+type Mode = "list" | "decide" | "auto" | "history" | "sessionDetail" | "done";
+
+type ListItem =
+  | { kind: "auto"; entry: AutoSessionEntry }
+  | { kind: "pending"; entry: PendingItem };
+
+const buildListItems = (): ListItem[] => [
+  ...autoSessionLog.map((entry) => ({ kind: "auto" as const, entry })),
+  ...pending.map((entry) => ({ kind: "pending" as const, entry })),
+];
 
 const AUTO_DURATIONS = [5, 10, 15, 30] as const;
 type AutoCursor = 0 | 1 | 2 | 3;
 
 let pending: PendingItem[] = [];
-let listCursor = 0;
+let listCursor = 0; // index into buildListItems()
+let decideTarget: PendingItem | null = null;
+let sessionDetailTarget: AutoSessionEntry | null = null;
 let mode: Mode = "list";
 let decideCursor: 0 | 1 = 0;
 let autoCursor: AutoCursor = 0;
@@ -91,7 +102,8 @@ const loadPending = async (): Promise<void> => {
   }
   fresh.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   pending = fresh;
-  if (listCursor >= pending.length) listCursor = Math.max(0, pending.length - 1);
+  const total = autoSessionLog.length + pending.length;
+  if (listCursor >= total) listCursor = Math.max(0, total - 1);
 };
 
 const truncate = (s: string, n: number): string =>
@@ -126,15 +138,24 @@ const render = (): void => {
   }
 
   if (mode === "list") {
-    out += `${ANSI.dim}↑/↓ navigate · Enter: decide · a: auto-approve · ${autoApprove ? "c: cancel auto · " : ""}h: history · r: refresh · q: quit${ANSI.reset}\n\n`;
+    const items = buildListItems();
+    const total = items.length;
+    if (listCursor >= total) listCursor = Math.max(0, total - 1);
 
-    // Live feed of auto-approved queries during this session.
+    out += `${ANSI.dim}↑/↓ navigate · Enter: ${
+      total > 0
+        ? items[listCursor]?.kind === "pending"
+          ? "decide"
+          : "view full SQL"
+        : "—"
+    } · a: auto-approve · ${autoApprove ? "c: cancel auto · " : ""}h: history · r: refresh · q: quit${ANSI.reset}\n\n`;
+
+    // Auto-approved feed (with cursor support if cursor is in this section).
     if (autoApprove || autoSessionLog.length > 0) {
       const label = autoApprove
         ? `${ANSI.green}Auto-approved this session${ANSI.reset}`
         : `${ANSI.dim}Auto-approved (last session)${ANSI.reset}`;
-      out += `${label}  `;
-      out += `${ANSI.bold}${autoSessionApprovedCount} total${ANSI.reset}`;
+      out += `${label}  ${ANSI.bold}${autoSessionApprovedCount} total${ANSI.reset}`;
       if (autoSessionLog.length < autoSessionApprovedCount) {
         out += `  ${ANSI.dim}(showing newest ${autoSessionLog.length})${ANSI.reset}`;
       }
@@ -142,11 +163,16 @@ const render = (): void => {
       if (autoSessionLog.length === 0) {
         out += `  ${ANSI.dim}(none yet — waiting for incoming queries…)${ANSI.reset}\n`;
       } else {
-        for (const entry of autoSessionLog) {
+        autoSessionLog.forEach((entry, i) => {
           const when = new Date(entry.time).toLocaleTimeString();
           const sqlOneLine = truncate(entry.sql.replace(/\s+/g, " ").trim(), 70);
-          out += `  ${ANSI.dim}${when}${ANSI.reset}  ${ANSI.green}✓${ANSI.reset} ${entry.id.padEnd(28, " ")}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
-        }
+          const idCell = entry.id.padEnd(28, " ");
+          if (i === listCursor) {
+            out += `${ANSI.invert}${ANSI.bold} ▶ ${ANSI.dim}${when}${ANSI.reset}${ANSI.invert}${ANSI.bold}  ${ANSI.green}✓${ANSI.reset}${ANSI.invert}${ANSI.bold} ${idCell}${ANSI.reset}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
+          } else {
+            out += `   ${ANSI.dim}${when}${ANSI.reset}  ${ANSI.green}✓${ANSI.reset} ${idCell}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
+          }
+        });
       }
       out += `\n`;
     }
@@ -158,15 +184,30 @@ const render = (): void => {
       pending.forEach((p, i) => {
         const sqlOneLine = truncate(p.sql.replace(/\s+/g, " ").trim(), 70);
         const idCell = p.id.padEnd(28, " ");
-        if (i === listCursor) {
+        const combinedIndex = autoSessionLog.length + i;
+        if (combinedIndex === listCursor) {
           out += `${ANSI.invert}${ANSI.bold} ▶ ${idCell}${ANSI.reset}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
         } else {
           out += `   ${idCell}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
         }
       });
     }
+  } else if (mode === "sessionDetail") {
+    const sel = sessionDetailTarget;
+    if (!sel) {
+      mode = "list";
+      return render();
+    }
+    out += `${ANSI.dim}Esc: back · q: quit${ANSI.reset}\n\n`;
+    out += `${ANSI.bold}${sel.id}${ANSI.reset}  ${ANSI.invert}${ANSI.green} AUTO-APPROVED ${ANSI.reset}\n`;
+    out += `${ANSI.dim}approved at:${ANSI.reset} ${new Date(sel.time).toLocaleString()}\n`;
+    out += `${ANSI.dim}sql:${ANSI.reset}\n`;
+    for (const line of sel.sql.split("\n")) {
+      out += `  ${line}\n`;
+    }
+    out += `\n`;
   } else if (mode === "decide") {
-    const sel = pending[listCursor];
+    const sel = decideTarget;
     if (!sel) {
       mode = "list";
       return render();
@@ -340,7 +381,7 @@ const cancelAutoApprove = (): void => {
 };
 
 const commitDecision = async (): Promise<void> => {
-  const sel = pending[listCursor];
+  const sel = decideTarget;
   if (!sel) return;
   const approve = decideCursor === 0;
   try {
@@ -372,16 +413,25 @@ const onKey = async (
   if (key.name === "q" && mode === "list") return cleanup(0);
 
   if (mode === "list") {
+    const items = buildListItems();
     if (key.name === "up" && listCursor > 0) {
       listCursor--;
       render();
-    } else if (key.name === "down" && listCursor < pending.length - 1) {
+    } else if (key.name === "down" && listCursor < items.length - 1) {
       listCursor++;
       render();
-    } else if (key.name === "return" && pending.length > 0) {
-      mode = "decide";
-      decideCursor = 0;
-      render();
+    } else if (key.name === "return" && items.length > 0) {
+      const item = items[listCursor];
+      if (item?.kind === "pending") {
+        decideTarget = item.entry;
+        mode = "decide";
+        decideCursor = 0;
+        render();
+      } else if (item?.kind === "auto") {
+        sessionDetailTarget = item.entry;
+        mode = "sessionDetail";
+        render();
+      }
     } else if (key.name === "r") {
       await loadPending();
       render();
@@ -442,6 +492,18 @@ const onKey = async (
     } else if (key.name === "return") {
       await commitDecision();
     } else if (key.name === "escape") {
+      decideTarget = null;
+      mode = "list";
+      render();
+    } else if (key.name === "q") {
+      return cleanup(0);
+    }
+    return;
+  }
+
+  if (mode === "sessionDetail") {
+    if (key.name === "escape" || key.name === "return") {
+      sessionDetailTarget = null;
       mode = "list";
       render();
     } else if (key.name === "q") {
