@@ -22,12 +22,14 @@
     "approve": "node dist/cli/approve.js",
     "approve:watch": "node dist/cli/watch.js",
     "test:db": "tsx src/cli/check.ts",
+    "test:ssh": "tsx src/cli/checkSsh.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^16.4.5",
     "mssql": "^11.0.1",
+    "tunnel-ssh": "^5.2.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

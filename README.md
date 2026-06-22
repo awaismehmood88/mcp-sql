@@ -33,6 +33,25 @@ Key knobs:
 | `MCP_QUERY_TIMEOUT_MS` | `30000` | Per-query timeout |
 | `MCP_MAX_ROWS` | `1000` | Result truncation limit |
 
+### Connecting through an SSH bastion
+
+If the MSSQL server isn't directly reachable but you can SSH to a host that *can* reach it, enable the built-in SSH tunnel:
+
+```bash
+MSSQL_SSH_ENABLED=true
+MSSQL_SSH_HOST=bastion.example.com
+MSSQL_SSH_USER=awais
+MSSQL_SSH_PRIVATE_KEY_PATH=~/.ssh/id_rsa
+# MSSQL_SSH_PASSPHRASE=...   # only if the key is encrypted
+# MSSQL_SSH_PORT=22          # default
+# MSSQL_SSH_LOCAL_PORT=0     # 0 = pick a free ephemeral port
+
+MSSQL_SERVER=10.0.0.5        # the DB's private hostname as seen FROM the bastion
+MSSQL_PORT=1433
+```
+
+The server opens the tunnel at startup, picks a free local port, and stitches it into the mssql pool config so `runQuery` transparently goes through. Verify with `npm run test:db`. If the tunnel drops mid-session, the next query will error — restart Claude Code (`/mcp` → Reconnect) to reopen it.
+
 ## Wire it up to Claude Code
 
 Add to `~/.claude.json` (or your project's `.mcp.json`):

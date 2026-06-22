@@ -35,7 +35,16 @@ const main = async () => {
 main().catch((err) => {
   const message = err instanceof Error ? err.message : String(err);
   process.stderr.write(`\nFAILED: ${message}\n`);
-  if (/encrypt/i.test(message)) {
+  if (/no route to host|Channel open failure/i.test(message)) {
+    process.stderr.write(
+      `Hint: SSH connected, but the BASTION cannot reach ${process.env.MSSQL_SERVER}:${process.env.MSSQL_PORT ?? 1433}.\n` +
+        `      Test from the bastion:\n` +
+        `        ssh ${process.env.MSSQL_SSH_USER}@${process.env.MSSQL_SSH_HOST} \\\n` +
+        `          "timeout 3 bash -c '</dev/tcp/${process.env.MSSQL_SERVER}/${process.env.MSSQL_PORT ?? 1433}' && echo OPEN || echo BLOCKED"\n` +
+        `      If BLOCKED, the bastion isn't on a network with route+ACL to the DB.\n` +
+        `      The DB may need a different bastion, or a different IP/hostname from the bastion's POV.\n`,
+    );
+  } else if (/encrypt/i.test(message)) {
     process.stderr.write(
       `Hint: set MSSQL_TRUST_SERVER_CERT=true (self-signed dev certs) or MSSQL_ENCRYPT=false.\n`,
     );

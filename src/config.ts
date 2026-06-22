@@ -15,6 +15,23 @@ loadDotenv();
 
 export type HitlMode = "interactive" | "dual_stage" | "off";
 
+export interface SshConfig {
+  host: string;
+  port: number;
+  username: string;
+  // Exactly one of (privateKeyPath, password, useAgent) is required.
+  // Priority if multiple set: privateKeyPath > password > useAgent.
+  privateKeyPath?: string;
+  passphrase?: string;
+  password?: string;
+  // If true, authenticate via ssh-agent using $SSH_AUTH_SOCK (or override).
+  useAgent: boolean;
+  agentSocket?: string;
+  // Local port to bind the tunnel to. If 0/undefined, an ephemeral port is
+  // picked at runtime and stitched into the mssql pool config.
+  localPort: number;
+}
+
 export interface Config {
   mssql: {
     server: string;
@@ -25,6 +42,7 @@ export interface Config {
     encrypt: boolean;
     trustServerCertificate: boolean;
   };
+  ssh: SshConfig | null;
   readOnly: boolean;
   hitlMode: HitlMode;
   pendingDir: string;
@@ -63,6 +81,37 @@ const hitlModeEnv = (fallback: HitlMode): HitlMode => {
   throw new Error(`MCP_HITL_MODE must be one of interactive|dual_stage|off, got: ${v}`);
 };
 
+const loadSshConfig = (): SshConfig | null => {
+  if (!boolEnv("MSSQL_SSH_ENABLED", false)) return null;
+  const privateKeyPath = process.env.MSSQL_SSH_PRIVATE_KEY_PATH?.trim() || undefined;
+  const password = process.env.MSSQL_SSH_PASSWORD ?? undefined;
+  const useAgent = boolEnv("MSSQL_SSH_USE_AGENT", false);
+  const agentSocket = process.env.MSSQL_SSH_AGENT_SOCK?.trim() || process.env.SSH_AUTH_SOCK;
+  if (!privateKeyPath && !password && !useAgent) {
+    throw new Error(
+      "MSSQL_SSH_ENABLED=true requires one of: MSSQL_SSH_PRIVATE_KEY_PATH, " +
+        "MSSQL_SSH_PASSWORD, or MSSQL_SSH_USE_AGENT=true.",
+    );
+  }
+  if (useAgent && !agentSocket) {
+    throw new Error(
+      "MSSQL_SSH_USE_AGENT=true but neither MSSQL_SSH_AGENT_SOCK nor SSH_AUTH_SOCK is set. " +
+        "Is ssh-agent running? Try: eval \"$(ssh-agent -s)\" && ssh-add",
+    );
+  }
+  return {
+    host: required("MSSQL_SSH_HOST"),
+    port: intEnv("MSSQL_SSH_PORT", 22),
+    username: required("MSSQL_SSH_USER"),
+    privateKeyPath,
+    passphrase: process.env.MSSQL_SSH_PASSPHRASE ?? undefined,
+    password,
+    useAgent,
+    agentSocket: useAgent ? agentSocket : undefined,
+    localPort: intEnv("MSSQL_SSH_LOCAL_PORT", 0), // 0 = pick a free port
+  };
+};
+
 export const loadConfig = (): Config => {
   const database = required("MSSQL_DATABASE");
   return {
@@ -75,6 +124,7 @@ export const loadConfig = (): Config => {
       encrypt: boolEnv("MSSQL_ENCRYPT", true),
       trustServerCertificate: boolEnv("MSSQL_TRUST_SERVER_CERT", false),
     },
+    ssh: loadSshConfig(),
     readOnly: boolEnv("MCP_READ_ONLY", true),
     hitlMode: hitlModeEnv("interactive"),
     pendingDir: resolvePendingDir(import.meta.url, 1),
