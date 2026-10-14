@@ -73,6 +73,7 @@ const runAuto = async (minutes: number): Promise<void> => {
           recordDecision({
             decidedAt: new Date().toISOString(),
             id: r.id,
+            connection: r.connection,
             sql: r.sql,
             decision: "approved",
             mode: "auto",
@@ -80,7 +81,7 @@ const runAuto = async (minutes: number): Promise<void> => {
           approvedCount++;
           const sqlOneLine = r.sql.replace(/\s+/g, " ").slice(0, 80);
           process.stdout.write(
-            `[${new Date().toLocaleTimeString()}] ✓ approved ${id} — ${sqlOneLine}\n`,
+            `[${new Date().toLocaleTimeString()}] ✓ approved ${id} [${r.connection ?? "default"}] — ${sqlOneLine}\n`,
           );
         } catch {
           // already decided — ignore
@@ -159,12 +160,15 @@ const main = async (): Promise<void> => {
     process.exit(1);
   }
 
-  process.stdout.write(`Request ${id}\n  SQL: ${existing.sql}\n`);
+  process.stdout.write(
+    `Request ${id}\n  Connection: ${existing.connection ?? "default"}\n  SQL: ${existing.sql}\n`,
+  );
 
   const updated = await decideRequest(dir, id, reject ? "rejected" : "approved", reason);
   recordDecision({
     decidedAt: new Date().toISOString(),
     id: updated.id,
+    connection: existing.connection,
     sql: existing.sql,
     decision: reject ? "rejected" : "approved",
     mode: "manual",

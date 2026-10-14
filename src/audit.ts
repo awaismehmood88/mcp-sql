@@ -32,6 +32,8 @@ const getStream = (): fs.WriteStream | null => {
 export interface AuditEntry {
   decidedAt: string;
   id: string;
+  // Connection tag; optional because entries predating multi-connection lack it.
+  connection?: string;
   sql: string;
   decision: "approved" | "rejected";
   mode: "auto" | "manual";

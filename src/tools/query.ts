@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { Config } from "../config.js";
+import { getConnection, type Config } from "../config.js";
 import { runQuery } from "../db.js";
 import { assertReadOnly, ReadOnlyViolationError } from "../readonly.js";
 import {
@@ -9,6 +9,7 @@ import {
   writeRequest,
 } from "../gating/dualStage.js";
 import { log } from "../logger.js";
+import { connectionInput, connectionsBlurb, sourceNote, sourceOf } from "./connectionArg.js";
 
 export const registerQuery = (server: McpServer, cfg: Config): void => {
   const gatedNote =
@@ -26,20 +27,24 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
       title: "Run a SQL query",
       description:
         "ONLY USE WHEN THE USER EXPLICITLY ASKS to run a SQL query, fetch records, " +
-        "or read data from the MSSQL database (phrases like 'query the db', 'fetch " +
+        "or read data from an MSSQL database (phrases like 'query the db', 'fetch " +
         "rows from', 'select from', 'show me records'). Do NOT call this " +
         "proactively. Every call requires explicit human approval — do not invoke " +
         "speculatively.\n\n" +
-        `Executes a SQL query against MSSQL database "${cfg.sourceLabel}" and returns the rows.` +
+        "Executes a SQL query against the chosen MSSQL connection and returns the rows." +
         (cfg.readOnly ? " Read-only mode: only SELECT/WITH/EXPLAIN statements are allowed." : "") +
         gatedNote +
-        `\n\nWhen relaying the result to the user, ALWAYS state the source as ` +
-        `"mssql:${cfg.sourceLabel}" so they know which database the rows came from.`,
+        connectionsBlurb(cfg) +
+        sourceNote(),
       inputSchema: {
+        connection: connectionInput(cfg),
         sql: z.string().min(1).describe("The SQL statement to execute."),
       },
     },
-    async ({ sql }) => {
+    async ({ connection, sql }) => {
+      const conn = getConnection(cfg, connection);
+      const source = sourceOf(conn.tag);
+
       if (cfg.readOnly) {
         try {
           assertReadOnly(sql);
@@ -52,10 +57,10 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
       }
 
       if (cfg.hitlMode === "interactive") {
-        const req = await createRequest(cfg.pendingDir, sql);
-        log.info("PENDING REQUEST — review and approve:", { id: req.id, sql });
+        const req = await createRequest(cfg.pendingDir, sql, conn.tag);
+        log.info("PENDING REQUEST — review and approve:", { id: req.id, connection: conn.tag, sql });
         process.stderr.write(
-          `\n=== Pending query ${req.id} ===\n${sql}\n` +
+          `\n=== Pending query ${req.id} [${conn.tag}] ===\n${sql}\n` +
             `→ Approve via watcher (npm run approve:watch), or:\n` +
             `→ npx mcp-mssql-approve ${req.id}\n` +
             `→ npx mcp-mssql-approve ${req.id} --reject\n` +
@@ -89,7 +94,7 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
         }
         // Fall through to execute (approved).
         try {
-          const result = await runQuery(cfg, sql);
+          const result = await runQuery(cfg, conn.tag, sql);
           decided.status = "completed";
           decided.rows = result.rows;
           decided.columns = result.columns;
@@ -99,6 +104,7 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
           await writeRequest(cfg.pendingDir, decided);
           log.info("query executed", {
             id: decided.id,
+            connection: conn.tag,
             rowCount: result.rowCount,
             truncated: result.truncated,
           });
@@ -107,14 +113,11 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
               {
                 type: "text",
                 text:
-                  `Source: mssql:${cfg.sourceLabel}\n` +
+                  `Source: ${source}\n` +
                   `${result.rowCount} row(s)${result.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(result.columns)}`,
               },
             ],
-            structuredContent: { ...result, source: `mssql:${cfg.sourceLabel}` } as unknown as Record<
-              string,
-              unknown
-            >,
+            structuredContent: { ...result, source } as unknown as Record<string, unknown>,
           };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -122,7 +125,7 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
           decided.error = message;
           decided.completedAt = new Date().toISOString();
           await writeRequest(cfg.pendingDir, decided);
-          log.error("query failed", { id: decided.id, message });
+          log.error("query failed", { id: decided.id, connection: conn.tag, message });
           return { isError: true, content: [{ type: "text", text: `Query failed: ${message}` }] };
         }
       }
@@ -141,20 +144,26 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
 
       // hitlMode === "off"
       try {
-        const result = await runQuery(cfg, sql);
-        log.info("query executed (off)", { rowCount: result.rowCount, truncated: result.truncated });
+        const result = await runQuery(cfg, conn.tag, sql);
+        log.info("query executed (off)", {
+          connection: conn.tag,
+          rowCount: result.rowCount,
+          truncated: result.truncated,
+        });
         return {
           content: [
             {
               type: "text",
-              text: `${result.rowCount} row(s)${result.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(result.columns)}`,
+              text:
+                `Source: ${source}\n` +
+                `${result.rowCount} row(s)${result.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(result.columns)}`,
             },
           ],
-          structuredContent: result as unknown as Record<string, unknown>,
+          structuredContent: { ...result, source } as unknown as Record<string, unknown>,
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        log.error("query failed", { message });
+        log.error("query failed", { connection: conn.tag, message });
         return { isError: true, content: [{ type: "text", text: `Query failed: ${message}` }] };
       }
     },

@@ -1,9 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { Config } from "../config.js";
+import { getConnection, type Config } from "../config.js";
 import { runQuery } from "../db.js";
 import { readRequest, writeRequest } from "../gating/dualStage.js";
 import { log } from "../logger.js";
+import { sourceOf } from "./connectionArg.js";
 
 export const registerGetQueryResult = (server: McpServer, cfg: Config): void => {
   server.registerTool(
@@ -15,10 +16,10 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
         "in this same conversation. Do NOT call with arbitrary or guessed request_ids.\n\n" +
         `Returns one of: status='pending' (still awaiting human approval), ` +
         "status='rejected' (operator rejected), status='completed' (rows attached). " +
-        "On the first call after approval, the SQL is executed against MSSQL database " +
-        `"${cfg.sourceLabel}" and the rows are cached.\n\n` +
-        `When relaying completed results to the user, ALWAYS state the source as ` +
-        `"mssql:${cfg.sourceLabel}".`,
+        "On the first call after approval, the SQL is executed against the connection " +
+        "named in the original request_query call and the rows are cached.\n\n" +
+        "When relaying completed results to the user, ALWAYS state the source as " +
+        '"mssql:<connection tag>" (returned in the `source` field).',
       inputSchema: {
         request_id: z.string().describe("The REQ-... id returned by request_query."),
       },
@@ -30,6 +31,18 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
           isError: true,
           content: [{ type: "text", text: `Unknown request_id: ${request_id}` }],
         };
+      }
+
+      // Files written before multi-connection support have no `connection`;
+      // getConnection falls back to the sole configured one in that case.
+      let source: string;
+      let tag: string;
+      try {
+        tag = getConnection(cfg, req.connection).tag;
+        source = sourceOf(tag);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { isError: true, content: [{ type: "text", text: `Request ${req.id}: ${message}` }] };
       }
 
       if (req.status === "pending") {
@@ -68,13 +81,13 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
             {
               type: "text",
               text:
-                `Source: mssql:${cfg.sourceLabel}\n` +
+                `Source: ${source}\n` +
                 `${req.rowCount ?? 0} row(s)${req.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(req.columns ?? [])}`,
             },
           ],
           structuredContent: {
             status: "completed",
-            source: `mssql:${cfg.sourceLabel}`,
+            source,
             request_id: req.id,
             rows: req.rows ?? [],
             columns: req.columns ?? [],
@@ -86,7 +99,7 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
 
       // status === "approved" → execute now, cache, return.
       try {
-        const result = await runQuery(cfg, req.sql);
+        const result = await runQuery(cfg, tag, req.sql);
         req.status = "completed";
         req.rows = result.rows;
         req.columns = result.columns;
@@ -96,6 +109,7 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
         await writeRequest(cfg.pendingDir, req);
         log.info("dual-stage query executed", {
           id: req.id,
+          connection: tag,
           rowCount: result.rowCount,
           truncated: result.truncated,
         });
@@ -104,13 +118,13 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
             {
               type: "text",
               text:
-                `Source: mssql:${cfg.sourceLabel}\n` +
+                `Source: ${source}\n` +
                 `${result.rowCount} row(s)${result.truncated ? " (truncated)" : ""}; columns: ${JSON.stringify(result.columns)}`,
             },
           ],
           structuredContent: {
             status: "completed",
-            source: `mssql:${cfg.sourceLabel}`,
+            source,
             request_id: req.id,
             rows: result.rows,
             columns: result.columns,

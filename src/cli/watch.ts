@@ -35,9 +35,14 @@ const ANSI = {
 
 interface PendingItem {
   id: string;
+  connection: string | undefined;
   sql: string;
   createdAt: string;
 }
+
+// Short bracketed tag shown next to every request so the operator knows
+// which database it targets before approving.
+const connTag = (c: string | undefined): string => `[${c ?? "default"}]`;
 
 type Mode = "list" | "decide" | "auto" | "history" | "sessionDetail" | "done";
 
@@ -74,6 +79,7 @@ let historyOffset = 0;
 interface AutoSessionEntry {
   time: number;
   id: string;
+  connection: string | undefined;
   sql: string;
 }
 const AUTO_FEED_LIMIT = 20;
@@ -97,7 +103,7 @@ const loadPending = async (): Promise<void> => {
   for (const id of ids) {
     const r = await readRequest(dir, id);
     if (r?.status === "pending") {
-      fresh.push({ id: r.id, sql: r.sql, createdAt: r.createdAt });
+      fresh.push({ id: r.id, connection: r.connection, sql: r.sql, createdAt: r.createdAt });
     }
   }
   fresh.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -165,12 +171,13 @@ const render = (): void => {
       } else {
         autoSessionLog.forEach((entry, i) => {
           const when = new Date(entry.time).toLocaleTimeString();
-          const sqlOneLine = truncate(entry.sql.replace(/\s+/g, " ").trim(), 70);
+          const sqlOneLine = truncate(entry.sql.replace(/\s+/g, " ").trim(), 60);
           const idCell = entry.id.padEnd(28, " ");
+          const tagCell = connTag(entry.connection).padEnd(12, " ");
           if (i === listCursor) {
-            out += `${ANSI.invert}${ANSI.bold} ▶ ${ANSI.dim}${when}${ANSI.reset}${ANSI.invert}${ANSI.bold}  ${ANSI.green}✓${ANSI.reset}${ANSI.invert}${ANSI.bold} ${idCell}${ANSI.reset}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
+            out += `${ANSI.invert}${ANSI.bold} ▶ ${ANSI.dim}${when}${ANSI.reset}${ANSI.invert}${ANSI.bold}  ${ANSI.green}✓${ANSI.reset}${ANSI.invert}${ANSI.bold} ${idCell}${ANSI.reset}  ${ANSI.cyan}${tagCell}${ANSI.reset} ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
           } else {
-            out += `   ${ANSI.dim}${when}${ANSI.reset}  ${ANSI.green}✓${ANSI.reset} ${idCell}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
+            out += `   ${ANSI.dim}${when}${ANSI.reset}  ${ANSI.green}✓${ANSI.reset} ${idCell}  ${ANSI.cyan}${tagCell}${ANSI.reset} ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
           }
         });
       }
@@ -182,13 +189,14 @@ const render = (): void => {
     } else {
       out += `${ANSI.bold}${pending.length} pending${ANSI.reset}\n\n`;
       pending.forEach((p, i) => {
-        const sqlOneLine = truncate(p.sql.replace(/\s+/g, " ").trim(), 70);
+        const sqlOneLine = truncate(p.sql.replace(/\s+/g, " ").trim(), 60);
         const idCell = p.id.padEnd(28, " ");
+        const tagCell = connTag(p.connection).padEnd(12, " ");
         const combinedIndex = autoSessionLog.length + i;
         if (combinedIndex === listCursor) {
-          out += `${ANSI.invert}${ANSI.bold} ▶ ${idCell}${ANSI.reset}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
+          out += `${ANSI.invert}${ANSI.bold} ▶ ${idCell}${ANSI.reset}  ${ANSI.cyan}${tagCell}${ANSI.reset} ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
         } else {
-          out += `   ${idCell}  ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
+          out += `   ${idCell}  ${ANSI.cyan}${tagCell}${ANSI.reset} ${ANSI.dim}${sqlOneLine}${ANSI.reset}\n`;
         }
       });
     }
@@ -201,6 +209,7 @@ const render = (): void => {
     out += `${ANSI.dim}Esc: back · q: quit${ANSI.reset}\n\n`;
     out += `${ANSI.bold}${sel.id}${ANSI.reset}  ${ANSI.invert}${ANSI.green} AUTO-APPROVED ${ANSI.reset}\n`;
     out += `${ANSI.dim}approved at:${ANSI.reset} ${new Date(sel.time).toLocaleString()}\n`;
+    out += `${ANSI.dim}connection:${ANSI.reset} ${ANSI.cyan}${sel.connection ?? "default"}${ANSI.reset}\n`;
     out += `${ANSI.dim}sql:${ANSI.reset}\n`;
     for (const line of sel.sql.split("\n")) {
       out += `  ${line}\n`;
@@ -215,6 +224,7 @@ const render = (): void => {
     out += `${ANSI.dim}←/→ or ↑/↓ choose · Enter: confirm · Esc: back · q: quit${ANSI.reset}\n\n`;
     out += `${ANSI.bold}${sel.id}${ANSI.reset}\n`;
     out += `${ANSI.dim}created:${ANSI.reset} ${sel.createdAt}\n`;
+    out += `${ANSI.dim}connection:${ANSI.reset} ${ANSI.cyan}${ANSI.bold}${sel.connection ?? "default"}${ANSI.reset}\n`;
     out += `${ANSI.dim}sql:${ANSI.reset}\n`;
     for (const line of sel.sql.split("\n")) {
       out += `  ${line}\n`;
@@ -259,11 +269,12 @@ const render = (): void => {
             : `${ANSI.dim}MANUAL${ANSI.reset}`;
         const mark =
           h.decision === "approved" ? `${ANSI.green}✓${ANSI.reset}` : `${ANSI.red}✗${ANSI.reset}`;
-        const sql = truncate(h.sql.replace(/\s+/g, " ").trim(), 70);
+        const sql = truncate(h.sql.replace(/\s+/g, " ").trim(), 60);
         const selected = i === historyCursor;
         const prefix = selected ? `${ANSI.invert} ▶ ` : "   ";
         const idCell = h.id.padEnd(28, " ");
-        out += `${prefix}${ANSI.dim}${when}${ANSI.reset}  ${badge} ${mark}  ${idCell}${ANSI.reset}  ${ANSI.dim}${sql}${ANSI.reset}\n`;
+        const tagCell = connTag(h.connection).padEnd(12, " ");
+        out += `${prefix}${ANSI.dim}${when}${ANSI.reset}  ${badge} ${mark}  ${idCell}${ANSI.reset}  ${ANSI.cyan}${tagCell}${ANSI.reset} ${ANSI.dim}${sql}${ANSI.reset}\n`;
       }
       if (history.length > HISTORY_PAGE_SIZE) {
         out += `\n${ANSI.dim}showing ${historyOffset + 1}–${end} of ${history.length}${ANSI.reset}\n`;
@@ -315,11 +326,12 @@ const autoApproveNewPendings = async (): Promise<number> => {
         recordDecision({
           decidedAt: new Date().toISOString(),
           id: r.id,
+          connection: r.connection,
           sql: r.sql,
           decision: "approved",
           mode: "auto",
         });
-        autoSessionLog.unshift({ time: Date.now(), id: r.id, sql: r.sql });
+        autoSessionLog.unshift({ time: Date.now(), id: r.id, connection: r.connection, sql: r.sql });
         if (autoSessionLog.length > AUTO_FEED_LIMIT) {
           autoSessionLog = autoSessionLog.slice(0, AUTO_FEED_LIMIT);
         }
@@ -389,6 +401,7 @@ const commitDecision = async (): Promise<void> => {
     recordDecision({
       decidedAt: new Date().toISOString(),
       id: updated.id,
+      connection: sel.connection,
       sql: sel.sql,
       decision: approve ? "approved" : "rejected",
       mode: "manual",

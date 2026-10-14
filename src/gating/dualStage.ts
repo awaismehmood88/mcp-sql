@@ -8,6 +8,9 @@ export type RequestStatus = "pending" | "approved" | "rejected" | "completed";
 export interface PendingRequest {
   id: string;
   createdAt: string;
+  // Connection tag the SQL targets. Absent on files written before
+  // multi-connection support; readers should fall back to the default.
+  connection: string;
   sql: string;
   status: RequestStatus;
   rows: Record<string, unknown>[] | null;
@@ -34,11 +37,16 @@ const newId = (): string => {
   return `REQ-${ts}-${rnd}`;
 };
 
-export const createRequest = async (dir: string, sqlText: string): Promise<PendingRequest> => {
+export const createRequest = async (
+  dir: string,
+  sqlText: string,
+  connection: string,
+): Promise<PendingRequest> => {
   await ensureDir(dir);
   const req: PendingRequest = {
     id: newId(),
     createdAt: new Date().toISOString(),
+    connection,
     sql: sqlText,
     status: "pending",
     rows: null,

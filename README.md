@@ -1,6 +1,6 @@
 # mcp-mssql
 
-An MCP (Model Context Protocol) server that lets an AI agent (Claude Code, Claude Desktop, etc.) query a Microsoft SQL Server database **safely**, with two layers of human guard rails:
+An MCP (Model Context Protocol) server that lets an AI agent (Claude Code, Claude Desktop, etc.) query one or more Microsoft SQL Server databases **safely**, with two layers of human guard rails:
 
 1. **Read-only by default** — only `SELECT` / `WITH` / `EXPLAIN` are allowed.
 2. **Human-in-the-loop gating** — every query needs human approval. Two modes:
@@ -16,12 +16,56 @@ npm run build
 
 ## Configure
 
-Copy `.env.example` to `.env` and fill in your MSSQL connection. Strongly recommended: create a dedicated DB login that has only `SELECT` permission on the schemas you want exposed. The server's read-only check is a second layer; the DB grant is the load-bearing one.
+Copy `.env.example` to `.env` and fill in your MSSQL connection(s). Strongly recommended: create a dedicated DB login that has only `SELECT` permission on the schemas you want exposed. The server's read-only check is a second layer; the DB grant is the load-bearing one.
 
 ```bash
 cp .env.example .env
 $EDITOR .env
 ```
+
+### One database (simple)
+
+```bash
+MSSQL_SERVER=localhost
+MSSQL_DATABASE=mydb
+MSSQL_USER=readonly_user
+MSSQL_PASSWORD=...
+# MCP_SOURCE_LABEL=shop   # optional tag; defaults to the database name
+```
+
+### Several databases (tagged connections)
+
+List the tags in `MSSQL_CONNECTIONS`, then give each one its own `MSSQL_<TAG>_*` block. The tag is uppercased and `-` becomes `_` to form the prefix (`psa-edu` → `MSSQL_PSA_EDU_*`). Every field falls back to the unprefixed `MSSQL_*` value, so shared server / login / SSH settings only need to be written once.
+
+```bash
+MSSQL_CONNECTIONS=psa-edu,hrms
+
+# Shared defaults (used by any tag that doesn't override them)
+MSSQL_SERVER=10.0.0.5
+MSSQL_USER=readonly_user
+MSSQL_PASSWORD=...
+
+MSSQL_PSA_EDU_DATABASE=PsaEdu
+MSSQL_PSA_EDU_DESCRIPTION=PSA education portal: students, courses, enrollments, fees
+
+MSSQL_HRMS_DATABASE=Hrms
+MSSQL_HRMS_DESCRIPTION=HR system: employees, departments, leave, payroll
+MSSQL_HRMS_SERVER=hr-db.internal       # override just for this tag
+MSSQL_HRMS_USER=hr_readonly
+MSSQL_HRMS_PASSWORD=...
+```
+
+| Per-tag var | Required | Fallback |
+| --- | --- | --- |
+| `MSSQL_<TAG>_DATABASE` | yes | none |
+| `MSSQL_<TAG>_DESCRIPTION` | no | database name |
+| `MSSQL_<TAG>_SERVER` / `_USER` / `_PASSWORD` | one level must set it | `MSSQL_SERVER` / `MSSQL_USER` / `MSSQL_PASSWORD` |
+| `MSSQL_<TAG>_PORT` / `_ENCRYPT` / `_TRUST_SERVER_CERT` | no | `MSSQL_PORT` etc., then `1433` / `true` / `false` |
+| `MSSQL_<TAG>_SSH_*` | no | `MSSQL_SSH_*` (see below) |
+
+Write the **description** for the agent, not for you: it is what the model reads to decide which connection a question belongs to. Say what the database holds and which app it backs.
+
+Tags must match `[a-z0-9][a-z0-9_-]*` (case-insensitive) and be unique. The agent passes the tag as the `connection` argument of every data tool; it's a required enum when more than one connection is configured and optional when there's exactly one.
 
 Key knobs:
 
@@ -50,7 +94,9 @@ MSSQL_SERVER=10.0.0.5        # the DB's private hostname as seen FROM the bastio
 MSSQL_PORT=1433
 ```
 
-The server opens the tunnel at startup, picks a free local port, and stitches it into the mssql pool config so `runQuery` transparently goes through. Verify with `npm run test:db`. If the tunnel drops mid-session, the next query will error — restart Claude Code (`/mcp` → Reconnect) to reopen it.
+The server opens the tunnel at startup, picks a free local port, and stitches it into the mssql pool config so `runQuery` transparently goes through. Verify with `npm run test:ssh` and `npm run test:db` (pass a tag to test one connection: `npm run test:db -- hrms`). If the tunnel drops mid-session, the next query will error — restart Claude Code (`/mcp` → Reconnect) to reopen it.
+
+With several connections, the unprefixed `MSSQL_SSH_*` block is the shared default and each tag may override any of it with `MSSQL_<TAG>_SSH_*`. A tag that is reachable directly can opt out with `MSSQL_<TAG>_SSH_ENABLED=false`. Each SSH-enabled connection opens its own tunnel.
 
 ## Wire it up to Claude Code
 
@@ -80,11 +126,14 @@ For interactive mode you need an MCP client that supports elicitation — Claude
 
 | Tool | When | What |
 | --- | --- | --- |
-| `list_tables` | always | Lists user tables from `INFORMATION_SCHEMA.TABLES`. No approval. |
-| `describe_table` | always | Column metadata. No approval. |
-| `query` | `interactive` / `off` | Validates → prompts user → runs → returns rows. |
-| `request_query` | `dual_stage` | Validates → writes pending file → returns `request_id`. Does not run. |
-| `get_query_result` | `dual_stage` | Polls a `request_id`: returns `pending`, `rejected`, or runs the SQL on first call after approval and returns rows. |
+| `list_connections` | always | Lists configured connections with tag, description, database, server. Touches no DB. No approval. |
+| `list_tables` | always | Lists user tables from `INFORMATION_SCHEMA.TABLES` on one `connection`. No approval. |
+| `describe_table` | always | Column metadata on one `connection`. No approval. |
+| `query` | `interactive` / `off` | Validates → prompts user → runs on `connection` → returns rows. |
+| `request_query` | `dual_stage` | Validates → writes pending file (with the `connection`) → returns `request_id`. Does not run. |
+| `get_query_result` | `dual_stage` | Polls a `request_id`: returns `pending`, `rejected`, or runs the SQL on the request's connection on first call after approval and returns rows. |
+
+`connection` is the tag from `MSSQL_CONNECTIONS`. The tag list and each description are embedded in every tool description, so the agent can usually pick the right database without calling `list_connections` first. Every result carries `source: "mssql:<tag>"` and the pending-request file, the watcher TUI, the approve CLI, and the audit log all show the tag so you know which database you're approving a query against.
 
 ## Approving a dual-stage query
 
@@ -135,7 +184,9 @@ SELECT TOP 5 * FROM dbo.Users
    ```bash
    echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node dist/index.js
    ```
-   Expect `list_tables`, `describe_table`, plus either `query` (interactive/off) or `request_query`+`get_query_result` (dual_stage).
+   Expect `list_connections`, `list_tables`, `describe_table`, plus either `query` (interactive/off) or `request_query`+`get_query_result` (dual_stage). With `MSSQL_CONNECTIONS` set, `connection` should appear as a required enum of your tags on the data tools.
+   Config parsing has unit tests: `npm test`.
 4. Read-only test: try `UPDATE users SET ...` via `query` — should return `isError: true` with a "Read-only mode" message.
 5. Interactive HITL: ask Claude Code to run `SELECT TOP 5 * FROM dbo.Users`. Expect an elicitation prompt; approving runs it; declining returns the reject message.
 6. Dual-stage: switch to `MCP_HITL_MODE=dual_stage`, restart, ask the same question, then approve from a second terminal. Watch the agent get rows on its next poll.
+7. Multi-connection: configure two tags, ask Claude Code something that only makes sense for one of them ("how many employees are on leave?"), and confirm it picks that tag and that the watcher shows the tag next to the pending request.

@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig } from "./config.js";
 import { closePool, getPool } from "./db.js";
 import { pruneOldRequests } from "./gating/dualStage.js";
+import { registerListConnections } from "./tools/listConnections.js";
 import { registerListTables } from "./tools/listTables.js";
 import { registerDescribeTable } from "./tools/describeTable.js";
 import { registerQuery } from "./tools/query.js";
@@ -16,22 +17,44 @@ const main = async () => {
   log.info("starting mcp-mssql", {
     readOnly: cfg.readOnly,
     hitlMode: cfg.hitlMode,
-    server: cfg.mssql.server,
-    database: cfg.mssql.database,
+    connections: cfg.connections.map((c) => ({
+      tag: c.tag,
+      server: c.mssql.server,
+      database: c.mssql.database,
+      ssh: c.ssh !== null,
+    })),
   });
 
-  // Eagerly establish the pool so connection errors surface at startup.
-  await getPool(cfg);
+  // Try to establish every pool at startup so connection errors surface fast —
+  // but DO NOT crash the server if one fails. A transient SSH/network blip
+  // shouldn't take down the whole MCP session; the next tool call will retry.
+  // Set MCP_EAGER_CONNECT=false to skip the eager attempt entirely.
+  const eagerConnect = !/^(0|false|no|off)$/i.test(process.env.MCP_EAGER_CONNECT ?? "");
+  if (eagerConnect) {
+    await Promise.all(
+      cfg.connections.map(async (c) => {
+        try {
+          await getPool(cfg, c.tag);
+        } catch (err) {
+          log.warn("eager pool connect failed at startup — will retry on first tool call", {
+            connection: c.tag,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }),
+    );
+  }
 
   if (cfg.hitlMode === "dual_stage") {
     await pruneOldRequests(cfg.pendingDir);
   }
 
   const server = new McpServer({
-    name: `mcp-mssql:${cfg.sourceLabel}`,
+    name: "mcp-mssql",
     version: "0.1.0",
   });
 
+  registerListConnections(server, cfg);
   registerListTables(server, cfg);
   registerDescribeTable(server, cfg);
 

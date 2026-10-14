@@ -13,14 +13,16 @@ This is an MCP server (TypeScript, ESM, Node 20+) that exposes a Microsoft SQL S
 ```
 src/
 ├── index.ts                # entry: build pool, register tools, connect stdio
-├── config.ts               # env parsing → typed Config
-├── db.ts                   # mssql ConnectionPool + runQuery
+├── config.ts               # env parsing → typed Config (one or many tagged connections)
+├── db.ts                   # one mssql ConnectionPool (+ SSH tunnel) per connection tag
 ├── readonly.ts             # assertReadOnly(sql)
 ├── logger.ts               # stderr-only logger
 ├── gating/
 │   ├── interactive.ts      # elicitation-based Y/N
 │   └── dualStage.ts        # file-backed request store
 ├── tools/                  # one file per MCP tool
+│   ├── connectionArg.ts    # shared `connection` zod input + description blurb
+│   ├── listConnections.ts  # discovery: tags + descriptions, touches no DB
 │   ├── listTables.ts
 │   ├── describeTable.ts
 │   ├── query.ts            # interactive / off
@@ -35,7 +37,7 @@ src/
 ## Adding a new tool
 
 1. Create `src/tools/myTool.ts` exporting `registerMyTool(server: McpServer, cfg: Config): void`.
-2. If it touches data, run `assertReadOnly(sql)` (when `cfg.readOnly`) and route through gating exactly like [src/tools/query.ts](src/tools/query.ts) — including the `dual_stage` early-return.
+2. If it touches data, take a `connection` input from `connectionInput(cfg)` in [src/tools/connectionArg.ts](src/tools/connectionArg.ts), resolve it with `getConnection(cfg, connection)`, and pass `conn.tag` to `runQuery`. Run `assertReadOnly(sql)` (when `cfg.readOnly`) and route through gating exactly like [src/tools/query.ts](src/tools/query.ts) — including the `dual_stage` early-return. Report `source: "mssql:<tag>"` in the result.
 3. Wire it in `src/index.ts` under the appropriate `cfg.hitlMode` branch.
 4. Update the **Tool surface** table in [README.md](README.md).
 5. Smoke-test with `echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node dist/index.js`.
@@ -49,8 +51,16 @@ Modes are an enum in [src/config.ts](src/config.ts): `interactive | dual_stage |
 - `npm run build` — `tsc` to `dist/`.
 - `npm run dev` — `tsx src/index.ts` for iteration.
 - `npm run typecheck` — type-check without emit.
+- `npm test` — `node --test` via `tsx` for pure logic (currently config parsing in `test/`).
 
-There is no test framework yet. Verification is manual against a real MSSQL instance per the steps in README.md § Manual verification.
+Anything that needs a database is verified manually against a real MSSQL instance per the steps in README.md § Manual verification.
+
+## Multi-connection model
+
+- `MSSQL_CONNECTIONS=tag1,tag2` + `MSSQL_<TAG>_*` blocks; every field falls back to the unprefixed `MSSQL_*` var. No `MSSQL_CONNECTIONS` → one legacy connection whose tag is `MCP_SOURCE_LABEL` or the database name. Keep that fallback working.
+- `MSSQL_<TAG>_DESCRIPTION` is agent-facing: it's what the model reads to pick a database. It is embedded in every data tool's description via `connectionsBlurb`.
+- Pending request files carry `connection`. `get_query_result` reads it from the file rather than taking it as input, so a request can't be redirected to another database after approval.
+- HITL mode and read-only mode are global, not per connection. Don't add per-connection relaxations without raising it.
 
 ## Things to be careful about
 

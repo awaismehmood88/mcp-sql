@@ -1,65 +1,86 @@
 import sql from "mssql";
-import type { Config } from "./config.js";
+import { getConnection, type Config, type ConnectionConfig } from "./config.js";
 import { log } from "./logger.js";
 import { openSshTunnel, type ActiveTunnel } from "./ssh.js";
 
-let pool: sql.ConnectionPool | null = null;
-let tunnel: ActiveTunnel | null = null;
+interface Live {
+  pool: sql.ConnectionPool | null;
+  tunnel: ActiveTunnel | null;
+}
 
-const ensureTunnel = async (cfg: Config): Promise<void> => {
-  if (!cfg.ssh) return;
-  if (tunnel) return;
-  tunnel = await openSshTunnel(cfg.ssh, cfg.mssql.server, cfg.mssql.port);
+// One pool (and, if configured, one SSH tunnel) per connection tag.
+const live = new Map<string, Live>();
+
+const slot = (tag: string): Live => {
+  let s = live.get(tag);
+  if (!s) {
+    s = { pool: null, tunnel: null };
+    live.set(tag, s);
+  }
+  return s;
 };
 
-export const getPool = async (cfg: Config): Promise<sql.ConnectionPool> => {
-  if (pool && pool.connected) return pool;
-  await ensureTunnel(cfg);
-  const server = tunnel ? tunnel.localHost : cfg.mssql.server;
-  const port = tunnel ? tunnel.localPort : cfg.mssql.port;
+const ensureTunnel = async (conn: ConnectionConfig, s: Live): Promise<void> => {
+  if (!conn.ssh) return;
+  if (s.tunnel) return;
+  s.tunnel = await openSshTunnel(conn.ssh, conn.mssql.server, conn.mssql.port);
+};
+
+export const getPool = async (cfg: Config, tag?: string | null): Promise<sql.ConnectionPool> => {
+  const conn = getConnection(cfg, tag);
+  const s = slot(conn.tag);
+  if (s.pool && s.pool.connected) return s.pool;
+  await ensureTunnel(conn, s);
+  const server = s.tunnel ? s.tunnel.localHost : conn.mssql.server;
+  const port = s.tunnel ? s.tunnel.localPort : conn.mssql.port;
   const p = new sql.ConnectionPool({
     server,
     port,
-    database: cfg.mssql.database,
-    user: cfg.mssql.user,
-    password: cfg.mssql.password,
+    database: conn.mssql.database,
+    user: conn.mssql.user,
+    password: conn.mssql.password,
     options: {
-      encrypt: cfg.mssql.encrypt,
-      trustServerCertificate: cfg.mssql.trustServerCertificate,
+      encrypt: conn.mssql.encrypt,
+      trustServerCertificate: conn.mssql.trustServerCertificate,
     },
     requestTimeout: cfg.queryTimeoutMs,
     pool: { min: 0, max: 5, idleTimeoutMillis: 30_000 },
   });
-  p.on("error", (err) => log.error("mssql pool error", { message: err.message }));
+  p.on("error", (err) => log.error("mssql pool error", { connection: conn.tag, message: err.message }));
   await p.connect();
-  pool = p;
+  s.pool = p;
   log.info("connected to mssql", {
-    server: cfg.mssql.server,
-    database: cfg.mssql.database,
-    viaTunnel: tunnel
-      ? { localHost: tunnel.localHost, localPort: tunnel.localPort }
-      : false,
+    connection: conn.tag,
+    server: conn.mssql.server,
+    database: conn.mssql.database,
+    viaTunnel: s.tunnel ? { localHost: s.tunnel.localHost, localPort: s.tunnel.localPort } : false,
   });
-  return pool;
+  return p;
 };
 
+const closeOne = async (tag: string, s: Live): Promise<void> => {
+  if (s.pool) {
+    try {
+      await s.pool.close();
+    } catch (err) {
+      log.warn("error closing mssql pool", { connection: tag, message: (err as Error).message });
+    }
+    s.pool = null;
+  }
+  if (s.tunnel) {
+    try {
+      await s.tunnel.close();
+    } catch (err) {
+      log.warn("error closing SSH tunnel", { connection: tag, message: (err as Error).message });
+    }
+    s.tunnel = null;
+  }
+};
+
+// Closes every open pool and tunnel.
 export const closePool = async (): Promise<void> => {
-  if (pool) {
-    try {
-      await pool.close();
-    } catch (err) {
-      log.warn("error closing mssql pool", { message: (err as Error).message });
-    }
-    pool = null;
-  }
-  if (tunnel) {
-    try {
-      await tunnel.close();
-    } catch (err) {
-      log.warn("error closing SSH tunnel", { message: (err as Error).message });
-    }
-    tunnel = null;
-  }
+  await Promise.all([...live.entries()].map(([tag, s]) => closeOne(tag, s)));
+  live.clear();
 };
 
 export interface QueryResult {
@@ -69,8 +90,12 @@ export interface QueryResult {
   truncated: boolean;
 }
 
-export const runQuery = async (cfg: Config, text: string): Promise<QueryResult> => {
-  const p = await getPool(cfg);
+export const runQuery = async (
+  cfg: Config,
+  tag: string | null | undefined,
+  text: string,
+): Promise<QueryResult> => {
+  const p = await getPool(cfg, tag);
   const req = p.request();
   const result = await req.query(text);
   const recordset = result.recordset ?? [];

@@ -23,7 +23,8 @@
     "approve:watch": "node dist/cli/watch.js",
     "test:db": "tsx src/cli/check.ts",
     "test:ssh": "tsx src/cli/checkSsh.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
