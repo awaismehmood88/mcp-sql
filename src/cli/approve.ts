@@ -13,7 +13,7 @@ loadDotenv();
 
 const pendingDir = (): string => resolvePendingDir(import.meta.url, 2);
 
-const AUTO_DURATIONS = [5, 10, 15, 30] as const;
+const AUTO_DURATIONS = [5, 10, 15, 30, 100, 300] as const;
 
 const usage = (): never => {
   process.stderr.write(
