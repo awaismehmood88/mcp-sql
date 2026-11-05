@@ -4,6 +4,7 @@ import { getConnection, type Config } from "../config.js";
 import { assertReadOnly, ReadOnlyViolationError } from "../readonly.js";
 import { createRequest } from "../gating/dualStage.js";
 import { log } from "../logger.js";
+import { tryAutoApprove } from "../gating/autoApprove.js";
 import { connectionInput, connectionsBlurb, sourceNote } from "./connectionArg.js";
 
 export const registerRequestQuery = (server: McpServer, cfg: Config): void => {
@@ -16,7 +17,7 @@ export const registerRequestQuery = (server: McpServer, cfg: Config): void => {
         "MSSQL database. Do NOT call this proactively or speculatively.\n\n" +
         "Submits a SQL query for human approval against the chosen MSSQL connection " +
         "and returns a request_id immediately. The query does NOT run until the operator " +
-        "approves it in a separate terminal (`npm run approve:watch` or `mcp-mssql-approve <id>`). " +
+        "approves it in the mcp-sql dashboard (or has armed a time-boxed auto-approve lease). " +
         "Poll get_query_result with the returned request_id to fetch the rows once approved." +
         (cfg.readOnly ? " Read-only mode: only SELECT/WITH/EXPLAIN statements are allowed." : "") +
         connectionsBlurb(cfg) +
@@ -46,21 +47,26 @@ export const registerRequestQuery = (server: McpServer, cfg: Config): void => {
       log.info("PENDING REQUEST — review and approve:", { id: req.id, connection: conn.tag, sql });
       process.stderr.write(
         `\n=== Pending query ${req.id} [${conn.tag}] ===\n${sql}\n` +
-          `→ Approve:  npx mcp-mssql-approve ${req.id}\n` +
-          `→ Reject :  npx mcp-mssql-approve ${req.id} --reject\n` +
+          `→ Approve in the dashboard (mcp-sql), or:\n` +
+          `→ mcp-sql-approve ${req.id}\n` +
+          `→ mcp-sql-approve ${req.id} --reject\n` +
           `===============================\n\n`,
       );
 
+      const auto = await tryAutoApprove(cfg.pendingDir, req);
+      const status = auto ? auto.status : req.status;
       return {
         content: [
           {
             type: "text",
-            text:
-              `Query queued as ${req.id} on connection "${conn.tag}". Waiting for operator approval. ` +
-              `Call get_query_result with request_id="${req.id}" to poll for the result.`,
+            text: auto
+              ? `Query ${req.id} on connection "${conn.tag}" was auto-approved by the operator's lease. ` +
+                `Call get_query_result with request_id="${req.id}" to execute it and fetch rows.`
+              : `Query queued as ${req.id} on connection "${conn.tag}". Waiting for operator approval. ` +
+                `Call get_query_result with request_id="${req.id}" to poll for the result.`,
           },
         ],
-        structuredContent: { request_id: req.id, connection: conn.tag, status: req.status },
+        structuredContent: { request_id: req.id, connection: conn.tag, status },
       };
     },
   );

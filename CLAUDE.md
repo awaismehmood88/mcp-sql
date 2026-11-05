@@ -19,7 +19,9 @@ src/
 ├── logger.ts               # stderr-only logger
 ├── gating/
 │   ├── interactive.ts      # elicitation-based Y/N
-│   └── dualStage.ts        # file-backed request store
+│   ├── dualStage.ts        # file-backed request store
+│   ├── autoLease.ts        # time-boxed auto-approve lease file (arm/read/clear)
+│   └── autoApprove.ts      # server-side: approve a new request if a lease covers it
 ├── tools/                  # one file per MCP tool
 │   ├── connectionArg.ts    # shared `connection` zod input + description blurb
 │   ├── listConnections.ts  # discovery: tags + descriptions, touches no DB
@@ -29,10 +31,16 @@ src/
 │   ├── requestQuery.ts     # dual-stage stage 1
 │   └── getQueryResult.ts   # dual-stage stage 2
 └── cli/
-    └── approve.ts          # `mcp-mssql-approve` bin
+    ├── dashboard.ts        # `mcp-sql` bin: operator TUI (pending, approve, auto lease, history)
+    ├── approve.ts          # `mcp-sql-approve` bin: scriptable one-shot + `auto` lease cmds
+    ├── check.ts            # `mcp-sql-check` bin
+    └── checkSsh.ts
+scripts/
+    ├── install-mcp.sh      # npm install + build + claude mcp add + npm link
+    └── uninstall-mcp.sh
 ```
 
-`package.json` has two `bin` entries: `mcp-mssql` (the server) and `mcp-mssql-approve` (the CLI). The CLI deliberately does NOT load the full `Config` (which would force MSSQL_* env vars) — it only reads `MCP_PENDING_DIR`.
+`bin` entries: `mcp-sql` is the **dashboard**, not the server; the server is `mcp-sql-server` (`dist/index.js`) and Claude Code launches it by absolute path. `approve.ts` deliberately does NOT load the full `Config` — it only needs `MCP_PENDING_DIR`. `dashboard.ts` tries `loadConfig()` for the connections panel but degrades to a warning line if `.env` is incomplete.
 
 ## Adding a new tool
 
@@ -55,6 +63,13 @@ Modes are an enum in [src/config.ts](src/config.ts): `interactive | dual_stage |
 
 Anything that needs a database is verified manually against a real MSSQL instance per the steps in README.md § Manual verification.
 
+## Auto-approve lease
+
+- Single mechanism: `<pendingDir>/auto-approve.json` (see `gating/autoLease.ts`). The dashboard's `a` key and `mcp-sql-approve auto <min>` only write it; `c` / `auto off` delete it.
+- The **server** does the approving, in `tryAutoApprove` called right after `createRequest` in `query.ts` and `requestQuery.ts`. Nothing has to stay running. Don't reintroduce a sweeping process.
+- Lease is re-read on every request, never cached, so disarming is instant. Expired or malformed files are deleted on read. Hard cap `MAX_LEASE_MINUTES = 300`; don't raise it quietly.
+- Auto-approvals still hit the read-only check first, still write pending files, still echo to stderr, and are audited with `mode: "auto"` and the lease in `reason`.
+
 ## Multi-connection model
 
 - `MSSQL_CONNECTIONS=tag1,tag2` + `MSSQL_<TAG>_*` blocks; every field falls back to the unprefixed `MSSQL_*` var. No `MSSQL_CONNECTIONS` → one legacy connection whose tag is `MCP_SOURCE_LABEL` or the database name. Keep that fallback working.
@@ -66,5 +81,5 @@ Anything that needs a database is verified manually against a real MSSQL instanc
 
 - The `mssql` package returns `Date` objects for datetime columns. JSON-stringifying them works but loses the type. If the agent needs ISO strings, transform in `runQuery` rather than per-tool.
 - `sql.ConnectionPool` errors after connect (network blips) emit on `pool.on("error")` — we log them but don't auto-reconnect. The next `runQuery` call should reconnect because `getPool` checks `pool.connected`.
-- `request_query` writes the SQL to stderr in addition to the pending file. That's intentional — it's the "logged in your terminal so you can review it" UX from the dual-stage protocol. Don't quietly remove it.
+- `request_query` writes the SQL to stderr in addition to the pending file. That's intentional — it's the "logged in your terminal so you can review it" UX from the dual-stage protocol. Don't quietly remove it. Auto-approvals print a one-line `→ auto-approved …` there too.
 - Pending files include the full result set after completion. Treat `MCP_PENDING_DIR` like a cache of query output — sensitive. The 24 h prune in `pruneOldRequests` only runs at startup; longer-lived servers should add a periodic prune if this becomes a concern.

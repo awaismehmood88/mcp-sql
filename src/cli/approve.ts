@@ -1,11 +1,20 @@
 #!/usr/bin/env node
+// One-shot / scriptable approvals. The interactive dashboard is `mcp-sql`.
 import { config as loadDotenv } from "dotenv";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import fs from "node:fs";
 import { decideRequest, readRequest } from "../gating/dualStage.js";
 import { resolvePendingDir } from "../paths.js";
 import { recordDecision } from "../audit.js";
+import {
+  armLease,
+  clearLease,
+  describeScope,
+  formatRemaining,
+  leaseRemainingMs,
+  MAX_LEASE_MINUTES,
+  readLease,
+} from "../gating/autoLease.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 loadDotenv({ path: path.resolve(here, "..", "..", ".env") });
@@ -13,121 +22,90 @@ loadDotenv();
 
 const pendingDir = (): string => resolvePendingDir(import.meta.url, 2);
 
-const AUTO_DURATIONS = [5, 10, 15, 30, 100, 300] as const;
-
 const usage = (): never => {
   process.stderr.write(
     `Usage:\n` +
-      `  mcp-mssql-approve <REQ-id> [--reject] [--reason "<text>"]\n` +
+      `  mcp-sql-approve <REQ-id> [--reject] [--reason "<text>"]\n` +
       `      Approve (or reject with --reject) a single pending request.\n` +
       `\n` +
-      `  mcp-mssql-approve --auto <minutes>\n` +
-      `      Headless auto-approve: stay alive for N minutes auto-approving any\n` +
-      `      pending request that appears. Allowed values: ${AUTO_DURATIONS.join(", ")}.\n` +
-      `      Use this with PM2 / systemd / tmux when you don't want the TUI.\n` +
+      `  mcp-sql-approve auto <minutes> [--connection <tag>[,<tag>]]\n` +
+      `      Arm a time-boxed auto-approve lease (max ${MAX_LEASE_MINUTES} min) and exit.\n` +
+      `      The MCP server approves matching requests itself while the lease is\n` +
+      `      active — nothing needs to stay running.\n` +
+      `  mcp-sql-approve auto status\n` +
+      `  mcp-sql-approve auto off\n` +
       `\n` +
-      `Pending requests are read from the dir resolved by MCP_PENDING_DIR (defaults\n` +
+      `Interactive dashboard (live requests, approve/reject, arm/disarm auto): mcp-sql\n` +
+      `Pending requests live in the dir resolved by MCP_PENDING_DIR (defaults\n` +
       `to .mcp-pending under the mcp-mssql install directory).\n`,
   );
   process.exit(2);
 };
 
-const idFromFile = (file: string): string | null => {
-  const m = file.match(/^(REQ-[\w-]+)\.json$/);
-  return m ? m[1]! : null;
+// Accepts "15", "15m", "1h".
+const parseMinutes = (raw: string | undefined): number | null => {
+  if (!raw) return null;
+  const m = raw.trim().match(/^(\d+)\s*(m|min|h|hr)?$/i);
+  if (!m) return null;
+  const n = Number.parseInt(m[1]!, 10);
+  return /^h/i.test(m[2] ?? "") ? n * 60 : n;
 };
 
-const runAuto = async (minutes: number): Promise<void> => {
-  if (!AUTO_DURATIONS.includes(minutes as (typeof AUTO_DURATIONS)[number])) {
-    process.stderr.write(
-      `--auto <minutes> must be one of ${AUTO_DURATIONS.join(", ")}, got: ${minutes}\n`,
-    );
-    process.exit(2);
+const printStatus = async (dir: string): Promise<void> => {
+  const lease = await readLease(dir);
+  if (!lease) {
+    process.stdout.write(`Auto-approve: OFF (every request needs manual approval)\n`);
+    return;
   }
-
-  const dir = pendingDir();
-  await fs.promises.mkdir(dir, { recursive: true });
-  const until = Date.now() + minutes * 60 * 1000;
-  let approvedCount = 0;
-
   process.stdout.write(
-    `🟢 Headless auto-approve armed for ${minutes} min (window ends at ${new Date(until).toLocaleTimeString()})\n` +
-      `   Watching ${dir}\n` +
-      `   Press Ctrl+C to cancel early.\n\n`,
+    `Auto-approve: ON\n` +
+      `  scope     : ${describeScope(lease)}\n` +
+      `  remaining : ${formatRemaining(leaseRemainingMs(lease))} (until ${new Date(lease.until).toLocaleTimeString()})\n` +
+      `  armed by  : ${lease.armedBy} at ${new Date(lease.armedAt).toLocaleTimeString()}\n`,
   );
+};
 
-  const sweep = async (): Promise<void> => {
-    let files: string[] = [];
-    try {
-      files = await fs.promises.readdir(dir);
-    } catch {
-      return;
+const runAuto = async (args: string[]): Promise<void> => {
+  const dir = pendingDir();
+  const sub = args[0];
+  if (sub === "status") return printStatus(dir);
+  if (sub === "off") {
+    const removed = await clearLease(dir);
+    process.stdout.write(removed ? `Auto-approve lease cleared.\n` : `No active lease.\n`);
+    return;
+  }
+  const minutes = parseMinutes(sub);
+  if (minutes === null) {
+    process.stderr.write(`auto: expected <minutes>, "status" or "off", got: ${sub ?? "(nothing)"}\n`);
+    usage();
+  }
+  let connections: string[] | null = null;
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--connection" || a === "-c") {
+      const v = args[++i];
+      if (!v) return usage();
+      connections = v.split(",").map((s) => s.trim()).filter(Boolean);
+    } else {
+      process.stderr.write(`Unknown flag: ${a}\n`);
+      usage();
     }
-    for (const f of files) {
-      const id = idFromFile(f);
-      if (!id) continue;
-      const r = await readRequest(dir, id).catch(() => null);
-      if (r?.status === "pending") {
-        try {
-          await decideRequest(dir, id, "approved");
-          recordDecision({
-            decidedAt: new Date().toISOString(),
-            id: r.id,
-            connection: r.connection,
-            sql: r.sql,
-            decision: "approved",
-            mode: "auto",
-          });
-          approvedCount++;
-          const sqlOneLine = r.sql.replace(/\s+/g, " ").slice(0, 80);
-          process.stdout.write(
-            `[${new Date().toLocaleTimeString()}] ✓ approved ${id} [${r.connection ?? "default"}] — ${sqlOneLine}\n`,
-          );
-        } catch {
-          // already decided — ignore
-        }
-      }
-    }
-  };
-
-  // Initial sweep clears anything already waiting.
-  await sweep();
-
-  // fs.watch + periodic poll, until the window expires.
-  const watcher = fs.watch(dir, () => {
-    void sweep();
-  });
-  const poll = setInterval(() => void sweep(), 1500);
-
-  const shutdown = (signal?: string): void => {
-    clearInterval(poll);
-    watcher.close();
-    process.stdout.write(
-      `\n${signal ? `Cancelled by ${signal}. ` : "Window expired. "}` +
-        `Approved ${approvedCount} request(s).\n`,
-    );
-    process.exit(0);
-  };
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-
-  // Wait for window to elapse.
-  const msLeft = until - Date.now();
-  setTimeout(() => shutdown(), msLeft);
+  }
+  const lease = await armLease(dir, { minutes: minutes as number, connections });
+  process.stdout.write(
+    `🟢 Auto-approve armed for ${lease.durationMinutes} min on ${describeScope(lease)} ` +
+      `(until ${new Date(lease.until).toLocaleTimeString()}).\n` +
+      `   The MCP server will approve matching requests itself. Disarm early with: mcp-sql-approve auto off\n`,
+  );
 };
 
 const main = async (): Promise<void> => {
   const args = process.argv.slice(2);
   if (args.length === 0 || args[0] === "-h" || args[0] === "--help") usage();
 
-  // Auto mode: --auto <minutes>
-  if (args[0] === "--auto") {
-    const mins = Number.parseInt(args[1] ?? "", 10);
-    if (Number.isNaN(mins)) {
-      process.stderr.write(`--auto requires a number of minutes.\n`);
-      usage();
-    }
-    await runAuto(mins);
+  // `auto ...` (and the old `--auto <minutes>` spelling)
+  if (args[0] === "auto" || args[0] === "--auto") {
+    await runAuto(args.slice(1));
     return;
   }
 

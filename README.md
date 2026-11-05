@@ -5,14 +5,28 @@ An MCP (Model Context Protocol) server that lets an AI agent (Claude Code, Claud
 1. **Read-only by default** — only `SELECT` / `WITH` / `EXPLAIN` are allowed.
 2. **Human-in-the-loop gating** — every query needs human approval. Two modes:
    - `interactive` *(default)* — the server pops up a Y/N prompt in the MCP client via the elicitation API.
-   - `dual_stage` — the agent calls `request_query` and gets a `REQ-...` id; you approve it from a separate terminal with `mcp-mssql-approve REQ-...`. The agent polls `get_query_result` for the rows.
+   - `dual_stage` — the agent calls `request_query` and gets a `REQ-...` id; you approve it from a separate terminal with `mcp-sql-approve REQ-...`. The agent polls `get_query_result` for the rows.
 
 ## Install
 
+One command does everything: installs dependencies, builds, registers the server with Claude Code, and links the global `mcp-sql` dashboard command.
+
 ```bash
-npm install
-npm run build
+git clone <repo> && cd sql
+cp .env.example .env && $EDITOR .env     # fill in your connection(s)
+./scripts/install-mcp.sh                 # or: npm run install:mcp
 ```
+
+To remove: `./scripts/uninstall-mcp.sh` (unregisters from Claude Code and unlinks the commands; leaves `.env` alone).
+
+Commands you get, usable from any directory:
+
+| Command | What |
+| --- | --- |
+| `mcp-sql` | **Dashboard.** Live pending requests, approve/reject, arm or cancel auto-approve, history. |
+| `mcp-sql-approve` | Scriptable one-shot: `<REQ-id>`, `<REQ-id> --reject`, `auto 15m`, `auto status`, `auto off`. |
+| `mcp-sql-check [tag]` | Connectivity test for one or all connections. |
+| `mcp-sql-server` | The MCP server itself (Claude Code launches this; you don't). |
 
 ## Configure
 
@@ -100,7 +114,7 @@ With several connections, the unprefixed `MSSQL_SSH_*` block is the shared defau
 
 ## Wire it up to Claude Code
 
-Add to `~/.claude.json` (or your project's `.mcp.json`):
+`scripts/install-mcp.sh` does this for you. To do it by hand, add to `~/.claude.json` (or your project's `.mcp.json`):
 
 ```json
 {
@@ -135,7 +149,22 @@ For interactive mode you need an MCP client that supports elicitation — Claude
 
 `connection` is the tag from `MSSQL_CONNECTIONS`. The tag list and each description are embedded in every tool description, so the agent can usually pick the right database without calling `list_connections` first. Every result carries `source: "mssql:<tag>"` and the pending-request file, the watcher TUI, the approve CLI, and the audit log all show the tag so you know which database you're approving a query against.
 
-## Approving a dual-stage query
+## The dashboard and auto-approve
+
+Run `mcp-sql` in any terminal. It shows your connections, every pending request with its connection tag and SQL, and lets you approve or reject with Enter. Press `h` for the audit history.
+
+Press `a` to **arm auto-approve** for 5, 10, 15, 30, 60, 100 or 300 minutes, optionally scoped to one connection. This writes a small lease file (`auto-approve.json` in the pending dir). While it is unexpired, **the MCP server approves matching requests itself** the moment they arrive, so you can close the dashboard and keep working. Press `c` to cancel early. The same lease can be managed without the TUI:
+
+```bash
+mcp-sql-approve auto 15m                    # all connections
+mcp-sql-approve auto 30m --connection hrms  # only this tag
+mcp-sql-approve auto status
+mcp-sql-approve auto off
+```
+
+Auto-approve never bypasses the read-only check, and every auto-approved query is still written to the pending dir, echoed to the server's stderr, and logged to `logs/approvals.jsonl` with the lease that approved it. Hard cap is 300 minutes per lease.
+
+## Approving a dual-stage query by hand
 
 When `MCP_HITL_MODE=dual_stage`, the agent sees a workflow like:
 
@@ -144,17 +173,17 @@ agent → request_query(sql)        → { request_id: "REQ-1714742400-7c3a" }
 agent → get_query_result(REQ-...) → { status: "pending" }   (loop)
 ```
 
-In a separate terminal — the same working directory the MCP server was launched from (so `MCP_PENDING_DIR` resolves to the same place) — you run:
+In a separate terminal, from any directory (the pending dir is resolved relative to the install, not your cwd):
 
 ```bash
 # inspect (the file is plain JSON):
-cat .mcp-pending/REQ-1714742400-7c3a.json
+cat /path/to/sql/.mcp-pending/REQ-1714742400-7c3a.json
 
 # approve:
-node dist/cli/approve.js REQ-1714742400-7c3a
+mcp-sql-approve REQ-1714742400-7c3a
 
 # or reject:
-node dist/cli/approve.js REQ-1714742400-7c3a --reject --reason "looks like a join bomb"
+mcp-sql-approve REQ-1714742400-7c3a --reject --reason "looks like a join bomb"
 ```
 
 The next `get_query_result` call from the agent then runs the SQL and returns the rows.
@@ -164,16 +193,22 @@ When `request_query` is called the SQL is also dumped to the server's stderr, so
 ```
 === Pending query REQ-1714742400-7c3a ===
 SELECT TOP 5 * FROM dbo.Users
-→ Approve:  npx mcp-mssql-approve REQ-1714742400-7c3a
-→ Reject :  npx mcp-mssql-approve REQ-1714742400-7c3a --reject
+→ Approve in the dashboard (mcp-sql), or:
+→ mcp-sql-approve REQ-1714742400-7c3a
+→ mcp-sql-approve REQ-1714742400-7c3a --reject
 ===============================
 ```
+
+## Design docs
+
+- [docs/adr/](docs/adr/) — Architecture Decision Records: why things are the way they are.
+- [docs/superpowers/specs/](docs/superpowers/specs/) — feature design specs.
 
 ## Security model
 
 - **DB login:** create a dedicated SQL login with only `SELECT` permission on the schemas the agent should see. This is the primary protection.
 - **Read-only parser:** rejects multi-statement batches, non-SELECT leading keywords, and known-dangerous tokens (`xp_cmdshell`, `OPENROWSET`, `OPENQUERY`, `OPENDATASOURCE`, `BULK INSERT`, `SELECT … INTO`). It is a heuristic, not a real T-SQL parser. Don't rely on it as the only line of defence.
-- **HITL:** every `query` / `request_query` call goes past a human. `MCP_HITL_MODE=off` exists for trusted local-dev only — don't ship it.
+- **HITL:** every `query` / `request_query` call goes past a human, or past a lease that a human armed for at most 300 minutes. `MCP_HITL_MODE=off` exists for trusted local-dev only — don't ship it.
 - **stdout discipline:** MCP stdio uses stdout for protocol traffic, so the codebase logs only to stderr. Never `console.log` anywhere.
 
 ## Manual verification
@@ -188,5 +223,6 @@ SELECT TOP 5 * FROM dbo.Users
    Config parsing has unit tests: `npm test`.
 4. Read-only test: try `UPDATE users SET ...` via `query` — should return `isError: true` with a "Read-only mode" message.
 5. Interactive HITL: ask Claude Code to run `SELECT TOP 5 * FROM dbo.Users`. Expect an elicitation prompt; approving runs it; declining returns the reject message.
-6. Dual-stage: switch to `MCP_HITL_MODE=dual_stage`, restart, ask the same question, then approve from a second terminal. Watch the agent get rows on its next poll.
-7. Multi-connection: configure two tags, ask Claude Code something that only makes sense for one of them ("how many employees are on leave?"), and confirm it picks that tag and that the watcher shows the tag next to the pending request.
+6. Dual-stage: switch to `MCP_HITL_MODE=dual_stage`, restart, ask the same question, then approve from the dashboard. Watch the agent get rows on its next poll.
+7. Multi-connection: configure two tags, ask Claude Code something that only makes sense for one of them ("how many employees are on leave?"), and confirm it picks that tag and that the dashboard shows the tag next to the pending request.
+8. Auto-approve: run `mcp-sql-approve auto 5m --connection <tag>`, ask a question on that tag and confirm it runs with no prompt; ask one on another tag and confirm it still waits. `mcp-sql-approve auto off` should stop it immediately.

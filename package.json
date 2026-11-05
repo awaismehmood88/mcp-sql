@@ -5,26 +5,29 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "mcp-mssql": "dist/index.js",
-    "mcp-mssql-approve": "dist/cli/approve.js",
-    "mcp-mssql-check": "dist/cli/check.js",
-    "mcp-mssql-watch": "dist/cli/watch.js"
+    "mcp-sql": "dist/cli/dashboard.js",
+    "mcp-sql-server": "dist/index.js",
+    "mcp-sql-approve": "dist/cli/approve.js",
+    "mcp-sql-check": "dist/cli/check.js"
   },
   "files": [
     "dist",
     "README.md",
-    ".env.example"
+    ".env.example",
+    "scripts"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
+    "dashboard": "node dist/cli/dashboard.js",
     "approve": "node dist/cli/approve.js",
-    "approve:watch": "node dist/cli/watch.js",
     "test:db": "tsx src/cli/check.ts",
     "test:ssh": "tsx src/cli/checkSsh.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "install:mcp": "bash scripts/install-mcp.sh",
+    "uninstall:mcp": "bash scripts/uninstall-mcp.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

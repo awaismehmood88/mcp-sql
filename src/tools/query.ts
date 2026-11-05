@@ -9,14 +9,16 @@ import {
   writeRequest,
 } from "../gating/dualStage.js";
 import { log } from "../logger.js";
+import { tryAutoApprove } from "../gating/autoApprove.js";
 import { connectionInput, connectionsBlurb, sourceNote, sourceOf } from "./connectionArg.js";
 
 export const registerQuery = (server: McpServer, cfg: Config): void => {
   const gatedNote =
     cfg.hitlMode === "interactive"
-      ? " Each call writes a pending request that the operator approves via " +
-        "the watcher terminal (`npm run approve:watch`). The tool blocks until " +
-        "approved/rejected, then runs the SQL and returns rows."
+      ? " Each call writes a pending request that the operator approves in " +
+        "the mcp-sql dashboard. The tool blocks until approved/rejected " +
+        "(or is auto-approved if the operator armed a time-boxed lease), " +
+        "then runs the SQL and returns rows."
       : cfg.hitlMode === "off"
         ? " HITL gating is disabled (MCP_HITL_MODE=off)."
         : "";
@@ -61,20 +63,24 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
         log.info("PENDING REQUEST — review and approve:", { id: req.id, connection: conn.tag, sql });
         process.stderr.write(
           `\n=== Pending query ${req.id} [${conn.tag}] ===\n${sql}\n` +
-            `→ Approve via watcher (npm run approve:watch), or:\n` +
-            `→ npx mcp-mssql-approve ${req.id}\n` +
-            `→ npx mcp-mssql-approve ${req.id} --reject\n` +
+            `→ Approve in the dashboard (mcp-sql), or:\n` +
+            `→ mcp-sql-approve ${req.id}\n` +
+            `→ mcp-sql-approve ${req.id} --reject\n` +
             `===============================\n\n`,
         );
 
-        let decided;
-        try {
-          decided = await awaitDecision(cfg.pendingDir, req.id, {
-            timeoutMs: cfg.approvalTimeoutMs,
-          });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          return { isError: true, content: [{ type: "text", text: message }] };
+        // An active auto-approve lease lets the server approve its own
+        // request; otherwise block until a human decides.
+        let decided = await tryAutoApprove(cfg.pendingDir, req);
+        if (!decided) {
+          try {
+            decided = await awaitDecision(cfg.pendingDir, req.id, {
+              timeoutMs: cfg.approvalTimeoutMs,
+            });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { isError: true, content: [{ type: "text", text: message }] };
+          }
         }
 
         if (decided.status === "rejected") {
