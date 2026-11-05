@@ -105,7 +105,11 @@ export const buildLease = (opts: ArmOptions): AutoLease => {
 export const armLease = async (dir: string, opts: ArmOptions): Promise<AutoLease> => {
   const lease = buildLease(opts);
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(leasePath(dir), JSON.stringify(lease, null, 2), "utf8");
+  // Write-then-rename so the server (and dashboard) can never read a
+  // half-written file and mistake it for a malformed lease.
+  const tmp = `${leasePath(dir)}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(lease, null, 2), "utf8");
+  await fs.rename(tmp, leasePath(dir));
   return lease;
 };
 

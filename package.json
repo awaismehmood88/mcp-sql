@@ -1,6 +1,6 @@
 {
   "name": "mcp-mssql",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for Microsoft SQL Server with read-only mode and human-in-the-loop query gating.",
   "type": "module",
   "main": "dist/index.js",

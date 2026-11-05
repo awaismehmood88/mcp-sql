@@ -6,6 +6,7 @@ import path from "node:path";
 import { decideRequest, readRequest } from "../gating/dualStage.js";
 import { resolvePendingDir } from "../paths.js";
 import { recordDecision } from "../audit.js";
+import { sweepPendingUnderLease } from "../gating/autoApprove.js";
 import {
   armLease,
   clearLease,
@@ -92,9 +93,11 @@ const runAuto = async (args: string[]): Promise<void> => {
     }
   }
   const lease = await armLease(dir, { minutes: minutes as number, connections });
+  const swept = await sweepPendingUnderLease(dir, lease);
   process.stdout.write(
     `🟢 Auto-approve armed for ${lease.durationMinutes} min on ${describeScope(lease)} ` +
       `(until ${new Date(lease.until).toLocaleTimeString()}).\n` +
+      (swept.length > 0 ? `   Approved ${swept.length} request(s) that were already pending.\n` : "") +
       `   The MCP server will approve matching requests itself. Disarm early with: mcp-sql-approve auto off\n`,
   );
 };

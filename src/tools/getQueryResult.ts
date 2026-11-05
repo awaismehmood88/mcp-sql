@@ -5,6 +5,7 @@ import { runQuery } from "../db.js";
 import { readRequest, writeRequest } from "../gating/dualStage.js";
 import { log } from "../logger.js";
 import { sourceOf } from "./connectionArg.js";
+import { tryAutoApprove } from "../gating/autoApprove.js";
 
 export const registerGetQueryResult = (server: McpServer, cfg: Config): void => {
   server.registerTool(
@@ -25,7 +26,7 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
       },
     },
     async ({ request_id }) => {
-      const req = await readRequest(cfg.pendingDir, request_id);
+      let req = await readRequest(cfg.pendingDir, request_id);
       if (!req) {
         return {
           isError: true,
@@ -43,6 +44,12 @@ export const registerGetQueryResult = (server: McpServer, cfg: Config): void => 
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { isError: true, content: [{ type: "text", text: `Request ${req.id}: ${message}` }] };
+      }
+
+      if (req.status === "pending") {
+        // Lease armed after request_query ran? Approve it now and fall through.
+        const auto = await tryAutoApprove(cfg.pendingDir, req);
+        if (auto) req = auto;
       }
 
       if (req.status === "pending") {

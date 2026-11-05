@@ -15,6 +15,8 @@ import { log } from "./logger.js";
 const main = async () => {
   const cfg = loadConfig();
   log.info("starting mcp-mssql", {
+    version: "0.2.0",
+    autoApproveLease: true,
     readOnly: cfg.readOnly,
     hitlMode: cfg.hitlMode,
     connections: cfg.connections.map((c) => ({
@@ -51,7 +53,7 @@ const main = async () => {
 
   const server = new McpServer({
     name: "mcp-mssql",
-    version: "0.1.0",
+    version: "0.2.0",
   });
 
   registerListConnections(server, cfg);

@@ -76,6 +76,8 @@ export const registerQuery = (server: McpServer, cfg: Config): void => {
           try {
             decided = await awaitDecision(cfg.pendingDir, req.id, {
               timeoutMs: cfg.approvalTimeoutMs,
+              // A lease armed while we wait should still catch this request.
+              beforePoll: () => tryAutoApprove(cfg.pendingDir, req),
             });
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);

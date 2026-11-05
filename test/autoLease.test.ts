@@ -59,3 +59,18 @@ test("garbage lease file is removed on read", async () => {
   assert.equal(await readLease(dir), null);
   await assert.rejects(fs.stat(path.join(dir, LEASE_FILE)));
 });
+
+test("sweepPendingUnderLease approves only covered pending requests", async () => {
+  const { createRequest, readRequest } = await import("../src/gating/dualStage.js");
+  const { sweepPendingUnderLease } = await import("../src/gating/autoApprove.js");
+  const dir = await tmp();
+  const a = await createRequest(dir, "SELECT 1", "hrms");
+  const b = await createRequest(dir, "SELECT 2", "psa-edu");
+  const lease = buildLease({ minutes: 5, connections: ["hrms"], armedBy: "me" });
+  const swept = await sweepPendingUnderLease(dir, lease);
+  assert.deepEqual(swept.map((r) => r.id), [a.id]);
+  assert.equal((await readRequest(dir, a.id))?.status, "approved");
+  assert.equal((await readRequest(dir, b.id))?.status, "pending");
+  // second sweep is a no-op
+  assert.equal((await sweepPendingUnderLease(dir, lease)).length, 0);
+});

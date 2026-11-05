@@ -27,6 +27,7 @@ import {
   type AutoLease,
 } from "../gating/autoLease.js";
 import { loadConfig, type ConnectionConfig } from "../config.js";
+import { sweepPendingUnderLease } from "../gating/autoApprove.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 loadDotenv({ path: path.resolve(here, "..", "..", ".env") });
@@ -349,8 +350,13 @@ const flash = (text: string, color: string): void => {
 const arm = async (minutes: number, scope: string[] | null): Promise<void> => {
   try {
     const l = await armLease(dir, { minutes, connections: scope });
+    const swept = await sweepPendingUnderLease(dir, l);
     await refresh();
-    flash(`🟢 Auto-approve armed for ${minutes} min on ${describeScope(l)}`, ANSI.green);
+    flash(
+      `🟢 Auto-approve armed for ${minutes} min on ${describeScope(l)}` +
+        (swept.length > 0 ? ` — approved ${swept.length} already-pending` : ""),
+      ANSI.green,
+    );
   } catch (err) {
     flash(`! ${(err as Error).message}`, ANSI.yellow);
   }

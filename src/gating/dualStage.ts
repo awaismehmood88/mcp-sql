@@ -98,6 +98,9 @@ export const decideRequest = async (
 export interface AwaitOptions {
   pollIntervalMs?: number;
   timeoutMs?: number;
+  // Called on every poll while the request is still pending. If it returns a
+  // decided request (e.g. an auto-approve lease armed mid-wait), that wins.
+  beforePoll?: () => Promise<PendingRequest | null>;
 }
 
 export const awaitDecision = async (
@@ -109,6 +112,10 @@ export const awaitDecision = async (
   const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (opts.beforePoll) {
+      const auto = await opts.beforePoll();
+      if (auto) return auto;
+    }
     const req = await readRequest(dir, id);
     if (!req) throw new Error(`Request ${id} disappeared from disk.`);
     if (req.status === "approved" || req.status === "rejected") return req;
