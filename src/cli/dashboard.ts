@@ -154,6 +154,11 @@ const loadAutoFeed = async (): Promise<void> => {
 
 const refresh = async (): Promise<void> => {
   await loadLease();
+  // Fallback sweep: the server approves its own requests under a lease, but a
+  // server started before lease support existed (or several stale ones from
+  // old Claude Code sessions sharing this dir) never will. While the
+  // dashboard is open it covers for them.
+  if (lease) await sweepPendingUnderLease(dir, lease).catch(() => []);
   await Promise.all([loadPending(), loadAutoFeed()]);
   const total = autoFeed.length + pending.length;
   if (listCursor >= total) listCursor = Math.max(0, total - 1);

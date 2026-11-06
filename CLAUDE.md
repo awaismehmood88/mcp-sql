@@ -66,7 +66,7 @@ Anything that needs a database is verified manually against a real MSSQL instanc
 ## Auto-approve lease
 
 - Single mechanism: `<pendingDir>/auto-approve.json` (see `gating/autoLease.ts`). The dashboard's `a` key and `mcp-sql-approve auto <min>` only write it; `c` / `auto off` delete it.
-- The **server** does the approving, in `tryAutoApprove` called right after `createRequest` in `query.ts` and `requestQuery.ts`. Nothing has to stay running. Don't reintroduce a sweeping process.
+- The **server** does the approving, in `tryAutoApprove` called right after `createRequest` in `query.ts` and `requestQuery.ts`, and again on every poll while waiting. Nothing has to stay running. Arming a lease sweeps requests already pending; the dashboard repeats that sweep on each refresh as a fallback for stale server processes (old Claude Code sessions keep their own `dist/index.js` alive and share the pending dir).
 - Lease is re-read on every request, never cached, so disarming is instant. Expired or malformed files are deleted on read. Hard cap `MAX_LEASE_MINUTES = 300`; don't raise it quietly.
 - Auto-approvals still hit the read-only check first, still write pending files, still echo to stderr, and are audited with `mode: "auto"` and the lease in `reason`.
 
